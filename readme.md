@@ -2,7 +2,7 @@
 
 xpkg - a minimal package management tool without root
 
-version 0.2 by *xsy*, GPLv3 License
+version 0.3 by *xsy*, GPLv3 License
 
 ## requirements
 
@@ -32,6 +32,14 @@ in which `<path>` is an arbitrary writable location where you want to put all th
 
 After complete, you'll see a notice asking you to put something into you .bashrc file (or whatever shell config file). Just do it manually.
 
+Or if already installed an older version, you can run
+
+```
+SOFTWARE_BASE=<path> python xpkg.py --update
+```
+
+after obtaining the latest version.
+
 ### command
 
 After installation, you can use xpkg at your will.
@@ -41,7 +49,7 @@ xpkg --help           # show help
 xpkg --version        # show version
 xpkg --list           # list all installed packages
 xpkg -i unar aria2    # install packages
-xpkg -i unar --force  # force install, i.e. ignoring dependencies
+xpkg -i unar --force  # force install, i.e. ignoring dependency problems
 xpkg -r unar aria2    # remove packages
 xpkg --clear          # uninstall xpkg and clear all packages
 ```
