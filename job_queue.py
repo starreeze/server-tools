@@ -3,27 +3,20 @@
 # @Author  : Shangyu.Xing (starreeze@foxmail.com)
 
 from __future__ import annotations
-import datetime
-import json
-import os
-import subprocess
-import time
-import logging
-import sys
-from argparse import ArgumentParser, Namespace
+import sys, os, datetime, json, subprocess, time, logging
+from argparse import ArgumentParser
+from multiprocessing import Process
 
 log_format = "%(asctime)s --- %(levelname)s: %(message)s"
 formatter = logging.Formatter(fmt=log_format, datefmt="%Y-%m-%d %H:%M:%S")
 logger = logging.getLogger()
-logger.setLevel(logging.INFO)
+logger.setLevel(logging.DEBUG)
 stream_handler = logging.StreamHandler()
 stream_handler.setFormatter(formatter)
 logger.addHandler(stream_handler)
 
-# gpu_list = [0, 1, 2, 3]
-# free_minutes_before_run = 3
-output_dir = "/home/xingsy/jq_output"
-status_path = "/home/xingsy/jq_status.json"
+output_dir = "/workspace/hal/jq_output"
+status_path = "/workspace/hal/jq_status.json"
 
 
 class JobQueueManager:
@@ -31,6 +24,10 @@ class JobQueueManager:
         self.filename = filename
         self.job_id_counter = 0
         self.gpu_free_since: list[None | datetime.datetime] = [None] * 16
+        self.gpu_avail: set[int] = set()
+        self.gpu_pending: set[int] = set()
+        self.gpu_inuse: dict[int, int] = {}
+        self.running_jobs: dict[int, Process] = {}
 
     def load_jobs(self):
         if os.path.exists(self.filename):
@@ -68,36 +65,36 @@ class JobQueueManager:
         print(f"Deleted job {job_id}.")
 
     def check_gpu_availability(self, args):
+        if not self.gpu_pending:
+            return
         try:
             gpustat_output = subprocess.check_output(["gpustat", "--json"], text=True)
             gpu_data = json.loads(gpustat_output)
             current_time = datetime.datetime.now()
             for gpu_id, gpu in enumerate(gpu_data["gpus"]):
-                if gpu_id not in args.gpus:
+                if gpu_id not in self.gpu_pending:
                     continue
                 if gpu["memory.used"] < 1000:
                     logger.info(f"find free gpu: {gpu_id}")
                     if args.interval == 0:
-                        return gpu_id
-                    if self.gpu_free_since[gpu_id] is None:
+                        self.gpu_avail.add(gpu_id)
+                        self.gpu_pending.remove(gpu_id)
+                    elif self.gpu_free_since[gpu_id] is None:
                         self.gpu_free_since[gpu_id] = current_time
                     elif (current_time - self.gpu_free_since[gpu_id]).total_seconds() >= 60 * args.interval:  # type: ignore
-                        logger.info(f"starting job after waited...")
-                        return gpu_id
+                        # logger.info(f"starting job after waited...")
+                        self.gpu_avail.add(gpu_id)
+                        self.gpu_pending.remove(gpu_id)
                 else:
                     self.gpu_free_since[gpu_id] = None
-            logger.info(f"Not starting job.")
-            return None
         except subprocess.CalledProcessError:
             logger.error("Error running gpustat.")
-            return None
 
     def execute_job(self, job, gpu_id):
         env = os.environ.copy()
         env["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
         output_file = os.path.join(output_dir, f"job_{job['id']}_output.txt")
-        original_dir = os.getcwd()
-        os.chdir(job["dir"])
+        os.chdir(job["dir"])  # chdir in subprocess will not change the dir of main process
         try:
             with open(output_file, "w") as file, subprocess.Popen(
                 job["command"],
@@ -122,24 +119,40 @@ class JobQueueManager:
             logger.info(f"\nJob {job['id']} executed successfully.")
         except subprocess.CalledProcessError as e:
             logger.error(f"\nJob {job['id']} failed to execute. Error: {e}")
-        finally:
-            os.chdir(original_dir)
 
     def daemon(self, args):
         while True:
+            # check complete jobs and release gpus
+            for job_id, process in self.running_jobs.copy().items():
+                if not process.is_alive():
+                    gpu_id = self.gpu_inuse.pop(job_id)
+                    self.gpu_avail.add(gpu_id)
+                    logger.info(f"job {job_id} finished, gpu {gpu_id} is now available.")
+                    process.join()
+                    self.running_jobs.pop(job_id)
+
+            # start new jobs
             job_queue = self.load_jobs()
             if len(job_queue):
-                gpu_id = self.check_gpu_availability(args)
-                if gpu_id is not None:
+                self.check_gpu_availability(args)
+                if len(self.gpu_avail):
                     job = job_queue[0]
-                    self.execute_job(job, gpu_id)
+                    gpu_id = self.gpu_avail.pop()
+                    logger.info(f"starting job {job['id']} on gpu {gpu_id}")
+                    self.gpu_inuse[job["id"]] = gpu_id
+                    Process(target=self.execute_job, args=(job, gpu_id)).start()
                     job_queue = self.load_jobs()
                     job_queue.pop(0)
                     self.save_jobs(job_queue)
+                else:
+                    logger.info(f"No available gpu.")
+
+            logger.debug(f"gpu available: {self.gpu_avail}, pending: {self.gpu_pending}, inuse: {self.gpu_inuse}")
             time.sleep(args.frequency)
 
     def start_daemon(self, args):
         os.makedirs(output_dir, exist_ok=True)
+        self.gpu_pending = set(args.gpus)
         logger.info("Daemon started.")
         self.daemon(args)
 
