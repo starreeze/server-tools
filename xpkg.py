@@ -8,8 +8,10 @@ from pathlib import Path
 from argparse import ArgumentParser
 from collections import deque
 
-__version__ = "0.3"
+__version__ = "0.4"
 base_path = os.environ["SOFTWARE_BASE"]
+if not base_path:
+    base_path = "/tmp/software"
 status_path = os.path.join(base_path, "var/xpkg-status.json")
 tmp_path = os.path.join(base_path, "tmp")
 links = {"bin": "usr/bin", "sbin": "usr/sbin", "lib": "usr/lib", "lib64": "usr/lib"}
@@ -26,9 +28,7 @@ export LD_LIBRARY_PATH=$LD_LIBRARY_PATH$( find $LD_BASE -type d -printf ":%p" )
 
 def parse_args():
     parser = ArgumentParser()
-    parser.add_argument(
-        "--version", "-v", action="version", version="xpkg version " + __version__
-    )
+    parser.add_argument("--version", "-v", action="version", version="xpkg version " + __version__)
     parser.add_argument("--install", "-i", nargs="+", default=[], type=str)
     parser.add_argument("--remove", "-r", nargs="+", default=[], type=str)
     parser.add_argument(
@@ -81,7 +81,7 @@ def init():
     print(shell_config)
 
 
-def get_depends(name: str, manual=False) -> list[str]:
+def get_depends(name: str, manual=False) -> list:
     if name.startswith("python3-"):
         if manual:
             print("Error:", name, "is a python3-only package, please use pip instead")
@@ -94,18 +94,14 @@ def get_depends(name: str, manual=False) -> list[str]:
             )
             os.system('python -m pip install "{}"'.format(name))
             return []
-    depends = (
-        os.popen("apt-cache depends {} | grep ' Depends'".format(name))
-        .read()
-        .splitlines()
-    )
+    depends = os.popen("apt-cache depends {} | grep ' Depends'".format(name)).read().splitlines()
     depends = [x.split(": ")[1] for x in depends if not x.endswith(">")]
     if depends:
         print(name, "depends on ", depends, ", installing dependencies first")
     return depends
 
 
-def install_packages(names: list[str], status: dict, force=False, manual=False) -> None:
+def install_packages(names: list, status: dict, force=False, manual=False) -> None:
     required = set()
     processing = deque()
     for name in names:
@@ -125,14 +121,10 @@ def install_packages(names: list[str], status: dict, force=False, manual=False) 
         if os.system("apt-get download " + name):
             if force:
                 print("Error installing " + name + ": ignoring")
-            else:
-                raise RuntimeError("Error installing package " + name)
+                continue
+            raise RuntimeError("Error installing package " + name)
         filename = [file for file in os.listdir(".") if file.endswith(".deb")][0]
-        files = (
-            os.popen("dpkg-deb -xv {} {}".format(filename, base_path))
-            .read()
-            .splitlines()
-        )
+        files = os.popen("dpkg-deb -xv {} {}".format(filename, base_path)).read().splitlines()
         status[name] = {"type": "xpkg", "files": files}
         os.system("rm -f *.deb")
 
@@ -175,14 +167,10 @@ def main():
     with open(status_path, "r") as f:
         status = json.load(f)
     if args.list:
-        print(
-            "\n".join(key for key, value in status.items() if value["type"] == "xpkg")
-        )
+        print("\n".join(key for key, value in status.items() if value["type"] == "xpkg"))
         exit(0)
     if len([file for file in os.listdir(".") if file.endswith(".deb")]):
-        print(
-            "Error: current directory contains deb files. Please cd to another directory"
-        )
+        print("Error: current directory contains deb files. Please cd to another directory")
         exit(-1)
     if args.install:
         install_packages(args.install, status, args.force, True)
