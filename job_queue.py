@@ -13,7 +13,10 @@ logger = logging.getLogger()
 logger.setLevel(logging.DEBUG)
 stream_handler = logging.StreamHandler()
 stream_handler.setFormatter(formatter)
+file_handler = logging.FileHandler("jq_log.txt")
+file_handler.setFormatter(formatter)
 logger.addHandler(stream_handler)
+logger.addHandler(file_handler)
 
 output_dir = "/workspace/hal/jq_output"
 status_path = "/workspace/hal/jq_status.json"
@@ -74,7 +77,7 @@ class JobQueueManager:
             for gpu_id, gpu in enumerate(gpu_data["gpus"]):
                 if gpu_id not in self.gpu_pending:
                     continue
-                if gpu["memory.used"] < 1000:
+                if gpu["memory.used"] < 1000 and gpu["utilization.gpu"] == 0:
                     logger.info(f"find free gpu: {gpu_id}")
                     if args.interval == 0:
                         self.gpu_avail.add(gpu_id)
@@ -111,10 +114,8 @@ class JobQueueManager:
                         break
                     print(char, end="", flush=True)
                     file.write(char)
-                proc.wait()
-
-            if proc.returncode != 0:
-                raise subprocess.CalledProcessError(proc.returncode, job["command"])
+                if proc.wait() != 0:
+                    raise subprocess.CalledProcessError(proc.returncode, job["command"])
 
             logger.info(f"\nJob {job['id']} executed successfully.")
         except subprocess.CalledProcessError as e:
@@ -140,7 +141,9 @@ class JobQueueManager:
                     gpu_id = self.gpu_avail.pop()
                     logger.info(f"starting job {job['id']} on gpu {gpu_id}")
                     self.gpu_inuse[job["id"]] = gpu_id
-                    Process(target=self.execute_job, args=(job, gpu_id)).start()
+                    process = Process(target=self.execute_job, args=(job, gpu_id))
+                    self.running_jobs[job["id"]] = process
+                    process.start()
                     job_queue = self.load_jobs()
                     job_queue.pop(0)
                     self.save_jobs(job_queue)
@@ -155,9 +158,6 @@ class JobQueueManager:
         self.gpu_pending = set(args.gpus)
         logger.info("Daemon started.")
         self.daemon(args)
-
-    def stop_daemon(self):
-        pass  # XXX
 
 
 def parse_start_args(sys_args: list[str]):
@@ -181,8 +181,6 @@ def main():
     elif op == "start":
         args = parse_start_args(args)
         manager.start_daemon(args)
-    elif op == "stop":
-        manager.stop_daemon()
     else:
         print("Invalid command or arguments.")
 
