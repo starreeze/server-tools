@@ -1,4 +1,4 @@
-#!/usr/bin/python3
+#!/usr/bin/env python
 # -*- coding: utf-8 -*-
 # @Date    : 2022-11-24 19:40:25
 # @Author  : Shangyu.Xing (starreeze@foxmail.com)

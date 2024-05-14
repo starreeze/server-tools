@@ -233,14 +233,14 @@ def iterate_wrapper(
         data = iter(data)
         iterator_mode = True
 
+    # load checkpoint
     checkpoint = load_ckpt(checkpoint_path, restart)
     if checkpoint is None:
         checkpoint = [0] * num_workers
         with open(checkpoint_path, "w") as f:
             f.write("\n".join(map(str, checkpoint)))
     elif len(checkpoint) != num_workers:
-        print(f"checkpoint length {len(checkpoint)} does not match num_workers {num_workers}!")
-        exit(1)
+        raise ValueError(f"checkpoint length {len(checkpoint)} does not match num_workers {num_workers}!")
 
     # get multiprocessing results
     lock = Lock()
@@ -274,6 +274,7 @@ def iterate_wrapper(
         f = output_stream
     merge_files([process_output.format(i) for i in range(num_workers)], f)
 
+    # remove checkpoint file on complete
     try:
         os.remove(checkpoint_path)
     except FileNotFoundError:
