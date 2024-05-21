@@ -68,11 +68,11 @@ In this case you can try with `--force`, and if that fails we really have nothin
 
 # job queue
 
-A simple gpu job queue. This will maintain a queue of jobs to be executed on gpus, and will run them sequentially, always beginning from the job with highest gpu demands. If there is no free GPU available, it wait until there are enough free GPUs to execute the job. It will automatically set the environment variable `CUDA_AVAILABLE_DEVICES` to the free GPU IDs when run the job. The output of the jobs will be both logged to the console and a file.
+A simple gpu job queue. This will maintain a queue of jobs to be executed on gpus, and will run them sequentially, always beginning from the job with highest orders. Among the same order, those jobs with higher gpu demands will be prioritized. If there is no free GPU available, it wait until there are enough free GPUs to execute the job. It will automatically set the environment variable `CUDA_AVAILABLE_DEVICES` to the free GPU IDs when run the job. The output of the jobs will be both logged to the console and a file.
 
 It support the following operations:
 
-1. add: `python jobq.py add [job_cmd] [-n n_gpus_required]`. Add a job to the queue with command to be executed with os.system(job_cmd).
+1. add: `python jobq.py add [job_cmd] [-n n_gpus_required] [-o job_order]`. Add a job to the queue with command to be executed with os.system(job_cmd).
 2. list: `python jobq.py ls`. List all jobs in the queue, including an ID (which is a unique integer, starting from 0 and adds 1 for each job), the datetime upon creation, job command, and the gpu requirement.
 3. delete: `python jobq.py del [job_id]`. Delete a job from the queue by its ID.
 4. start: `python jobq.py start [-g gpus_to_be_used] [-i wait_time_before_using_a_free_gpu] [-f pool_frequency_for_checking_gpu_availability]`. Start a daemon to run the jobs in the queue. The daemon should run indefinitely until stopped manually. Note that even after the daemon is started, you can still modify the job queue, such as adding or deleting jobs to the queue.

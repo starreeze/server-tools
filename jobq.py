@@ -2,26 +2,49 @@
 # -*- coding: utf-8 -*-
 # @Date    : 2023-12-28 11:37:41
 # @Author  : Shangyu.Xing (starreeze@foxmail.com)
+"""
+A simple gpu job queue. This will maintain a queue of jobs to be executed on gpus, and will run them sequentially,
+always beginning from the job with highest orders. Among the same order,
+those jobs with higher gpu demands will be prioritized. If there is no free GPU available,
+it wait until there are enough free GPUs to execute the job.
+It will automatically set the environment variable `CUDA_AVAILABLE_DEVICES` to the free GPU IDs when run the job.
+The output of the jobs will be both logged to the console and a file.
+
+It support the following operations:
+1. add: `python jobq.py add [job_cmd] [-n n_gpus_required] [-o job_order]`.
+    Add a job to the queue with command to be executed with os.system(job_cmd).
+2. list: `python jobq.py ls`. List all jobs in the queue, including an ID
+    (which is a unique integer, starting from 0 and adds 1 for each job),
+    the datetime upon creation, job command, and the gpu requirement.
+3. delete: `python jobq.py del [job_id]`. Delete a job from the queue by its ID.
+4. start: `python jobq.py start [-g gpus_to_be_used] [-i wait_time_before_using_a_free_gpu]
+    [-f pool_frequency_for_checking_gpu_availability]`.
+    Start a daemon to run the jobs in the queue. The daemon should run indefinitely until stopped manually.
+    Note that even after the daemon is started, you can still modify the job queue,
+    such as adding or deleting jobs to the queue.
+"""
 
 from __future__ import annotations
 import sys, os, datetime, json, subprocess, time, logging
 from typing import Iterable, Any
-from argparse import ArgumentParser, Action
+from argparse import ArgumentParser
 from multiprocessing import Process
-
-log_format = "%(asctime)s --- %(levelname)s: %(message)s"
-formatter = logging.Formatter(fmt=log_format, datefmt="%Y-%m-%d %H:%M:%S")
-logger = logging.getLogger()
-logger.setLevel(logging.DEBUG)
-stream_handler = logging.StreamHandler()
-stream_handler.setFormatter(formatter)
-file_handler = logging.FileHandler("jq_log.txt")
-file_handler.setFormatter(formatter)
-logger.addHandler(stream_handler)
-logger.addHandler(file_handler)
 
 output_dir = os.path.expanduser("~/jq_output")
 status_path = os.path.expanduser("~/jq_status.json")
+logger = logging.getLogger()
+
+
+def setup_logger():
+    log_format = "%(asctime)s --- %(levelname)s: %(message)s"
+    formatter = logging.Formatter(fmt=log_format, datefmt="%Y-%m-%d %H:%M:%S")
+    logger.setLevel(logging.DEBUG)
+    stream_handler = logging.StreamHandler()
+    stream_handler.setFormatter(formatter)
+    logger.addHandler(stream_handler)
+    file_handler = logging.FileHandler(os.path.join(output_dir, "jq.log"))
+    file_handler.setFormatter(formatter)
+    logger.addHandler(file_handler)
 
 
 class GPUManager:
@@ -191,16 +214,13 @@ class JobQueue:
 
     def start(self, args):
         os.makedirs(output_dir, exist_ok=True)
+        setup_logger()
         self.gpu_manager = GPUManager(args.gpus)
         logger.info("Daemon started.")
         self.daemon(args)
 
 
 class ArgParser:
-    class SplitAction(Action):
-        def __call__(self, parser, namespace, values, option_string=None):
-            setattr(namespace, self.dest, values.split())  # type: ignore
-
     def __init__(self, args: list[str] | None):
         self.args = args
 
@@ -219,7 +239,17 @@ class ArgParser:
         return parser.parse_args(self.args)
 
 
+def print_help(invalid: bool):
+    if invalid:
+        print("Invalid arguments.")
+    print("Usage:")
+    print(__doc__)
+
+
 def main():
+    if len(sys.argv) < 2:
+        print_help(invalid=True)
+        return
     queue = JobQueue()
     op, args = sys.argv[1], sys.argv[2:]
     parser = ArgParser(args)
@@ -233,7 +263,7 @@ def main():
     elif op == "start":
         queue.start(parser.parse_start())
     else:
-        print("Invalid command or arguments.")
+        print_help(invalid=not ("-h" in sys.argv[1] or "help" in sys.argv[1]))
 
 
 if __name__ == "__main__":
