@@ -30,8 +30,8 @@ from typing import Iterable, Any
 from argparse import ArgumentParser
 from multiprocessing import Process
 
-output_dir = os.path.expanduser("~/jq_output")
-status_path = os.path.expanduser("~/jq_status.json")
+output_dir = os.path.expanduser("/home/nfs04/xingsy/logs/jq_output")
+status_path = os.path.expanduser("/home/nfs04/xingsy/logs/jq_status.json")
 logger = logging.getLogger()
 
 
@@ -119,7 +119,7 @@ class JobQueue:
 
     def add(self, args):
         job_queue = self.load()
-        job_id = max([job["id"] for job in job_queue], default=-1) + 1
+        job_id = max([job["id"] for job in job_queue], default=-1) + 1 if args.id == -1 else args.id
         current_dir = os.getcwd()
         job = {
             "id": job_id,
@@ -236,7 +236,10 @@ class ArgParser:
         parser.add_argument("cmd", nargs="+", help="the full command for this job")
         parser.add_argument("--ngpu", "-n", type=int, default=1, help="number of gpus needed for this job")
         parser.add_argument("--order", "-o", type=int, default=0, help="the order of this job")
-        return parser.parse_args(self.args)
+        parser.add_argument("--id", "-i", type=int, default=-1, help="the id of this job")
+        known_args, unknown_args = parser.parse_known_args(self.args)
+        known_args.cmd.extend(unknown_args)
+        return known_args
 
 
 def print_help(invalid: bool):
