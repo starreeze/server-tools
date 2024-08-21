@@ -7,39 +7,61 @@ from __future__ import annotations
 import os
 import traceback
 import json
-from typing import Any, Callable, Iterable, Iterator, TypeVar, TextIO, Sequence
+from typing import Any, BinaryIO, Callable, Iterable, Iterator, Literal, TextIO, TypeVar, IO, Sequence
 from glob import glob
 from itertools import product
 from functools import wraps
 from multiprocessing import Lock, Process
 
+# package info
+__name__ = __file__.split("/")[-1].split(".")[0]
+__version__ = "0.1.2"
+__author__ = "Starreeze"
+__license__ = "GPLv3"
+__url__ = "https://github.com/starreeze/server-tools"
+
 # default file path
 output_tmpl = "{name}_p{id}.output"
 ckpt_tmpl = "{name}.ckpt"
 
+# type
 DataType = TypeVar("DataType")
 
 
-def check_unfinished(run_name: str):
+def check_unfinished(run_name: str, warning_fn: Callable[[str], None] = print):
+    "To check if the run is unfinished, according to whether the checkpoint file and the cache file exists"
     ckpt = ckpt_tmpl.format(name=run_name)
     if os.path.exists(ckpt):
-        return len(glob(output_tmpl.format(name=run_name, id="*"))) == len(open(ckpt, "r").readlines())
+        num_cache = len(glob(output_tmpl.format(name=run_name, id="*")))
+        num_ckpt = len(open(ckpt, "r").readlines())
+        if num_cache == num_ckpt:
+            return True
+        warning_fn(f"unmatched: {num_cache} unfinished files vs {num_ckpt} checkpoints, restart from the beginning")
     return False
 
 
 class IterateWrapper:
-    "wrap some iterables to provide automatic resuming on interruption, no retrying and limited to sequence"
-
     def __init__(
         self,
         *data: Any,
-        mode="product",
+        mode: Literal["product", "zip"] = "product",
         restart=False,
-        bar=0,  # if -1 no bar at all
+        bar=0,
         total_items: int | None = None,
         convert_type=list,
         run_name="iterwrap",
     ):
+        """wrap some iterables to provide automatic resuming on interruption, no retrying and limited to sequence
+
+        Args:
+            data: iterables to be wrapped
+            mode: how to combine iterables. 'product' means Cartesian product, 'zip' means zip()
+            restart: whether to restart from the beginning
+            bar: the position of the progress bar. -1 means no bar
+            total_items: total items to be iterated
+            convert_type: convert the data to this type
+            run_name: name of the run to identify the checkpoint and output files
+        """
         if len(data) == 1:
             if convert_type is not None:
                 self.data = convert_type(data[0])
@@ -89,7 +111,7 @@ class IterateWrapper:
         return self.data[self.index]
 
 
-def retry_dec(retry=5, on_error="raise"):
+def retry_dec(retry=5, on_error: Literal["raise", "continue"] = "raise"):
     "decorator for retrying a function on exception; on_error could be raise or continue"
 
     def decorator(func):
@@ -118,7 +140,7 @@ def retry_dec(retry=5, on_error="raise"):
     return decorator
 
 
-def load_ckpt(path: str, restart: bool) -> list[int] | None:
+def _load_ckpt(path: str, restart: bool) -> list[int] | None:
     checkpoint = None
     if restart:
         if os.path.exists(path):
@@ -131,7 +153,7 @@ def load_ckpt(path: str, restart: bool) -> list[int] | None:
     return checkpoint
 
 
-def write_ckpt(path: str, checkpoint: int, process_idx: int, lock):
+def _write_ckpt(path: str, checkpoint: int, process_idx: int, lock):
     with lock:
         with open(path, "r") as f:
             checkpoints = f.read().splitlines()
@@ -140,9 +162,10 @@ def write_ckpt(path: str, checkpoint: int, process_idx: int, lock):
             f.write("\n".join(checkpoints))
 
 
-def process_job(
-    func: Callable[[TextIO, DataType, dict[str, Any]], None],
-    data: Iterator[DataType],
+def _process_job(
+    func: Callable[[IO, DataType, dict[str, Any]], None],
+    data: Iterator[DataType] | Sequence[DataType],
+    output_type: Literal["text", "binary", "none"],
     total_items: int,
     process_idx: int,
     num_workers: int,
@@ -182,38 +205,46 @@ def process_job(
 
     if iterator_mode:
         print(f"{process_idx}: skipping data until {checkpoint}")
+        assert isinstance(data, Iterator)
         for i in range_checkpointed:
             next(data)
 
     retry_func = retry_dec(retry, on_error)(func)
-    with open(output_tmpl.format(name=run_name, id=process_idx), "w" if restart else "a") as output:
-        for i in range_to_process:
-            if iterator_mode:
-                try:
-                    item = next(data)
-                except StopIteration:
-                    break
-            else:
-                assert isinstance(data, Sequence)
-                item = data[i]
-            retry_func(output, item, vars)
-            write_ckpt(ckpt_tmpl.format(name=run_name), i + 1, process_idx, lock)
+    open_flags = ("w" if restart else "a") + ("b" if output_type == "binary" else "")
+    output = open(output_tmpl.format(name=run_name, id=process_idx), open_flags) if output_type != "none" else None
+    for i in range_to_process:
+        if iterator_mode:
+            assert isinstance(data, Iterator)
+            try:
+                item = next(data)
+            except StopIteration:
+                break
+        else:
+            assert isinstance(data, Sequence)
+            item = data[i]
+        retry_func(output, item, vars)
+        _write_ckpt(ckpt_tmpl.format(name=run_name), i + 1, process_idx, lock)
+    if output is not None:
+        output.close()
 
 
-def merge_files(input_paths: list[str], output_stream: TextIO):
+def _merge_files(input_paths: list[str], output_stream: IO | None):
     for path in input_paths:
-        with open(path, "r") as f:
-            output_stream.write(f.read())
-        os.remove(path)
+        if output_stream is not None:
+            with open(path, "r") as f:
+                output_stream.write(f.read())
+        if os.path.exists(path):
+            os.remove(path)
 
 
 def iterate_wrapper(
-    func: Callable[[TextIO, DataType, dict[str, Any]], None],
+    func: Callable[[IO, DataType, dict[str, Any]], None],
     data: Iterable[DataType],
-    output: str | TextIO,
+    output: str | IO | None = None,
+    *,
     restart=False,
     retry=5,
-    on_error="raise",
+    on_error: Literal["raise", "continue"] = "raise",
     num_workers=1,
     bar=True,
     total_items=None,  # need to provide when data is not a sequence
@@ -223,10 +254,21 @@ def iterate_wrapper(
     # for plain vars, one can simply use closure or functools.partial to pass into func
     vars_factory: Callable[[], dict[str, Any]] = lambda: {},
 ) -> None:
-    """
-    Need hand-crafted function but support retrying, multiprocessing and iterable.
-    Only support io stream to save the processed data.
-    Callbacks can be implemented by setting envs, e.g. PROC_ID or GPU_ID.
+    """Wrapper on a processor (func) and iterable (data) to support multiprocessing, retrying and automatic resuming.
+
+    Args:
+        func: The processor function. It should accept three arguments: output stream, data item and vars. Within func, the output stream can be used to save data in real time.
+        data: The data to be processed. It can be an iterable or a sequence.
+        output: The output stream. It can be a file path, a file object or None. If None, no output will be written.
+        restart: Whether to restart from the beginning.
+        retry: The number of retries for processing each data item.
+        on_error: The action to take when an error occurs.
+        num_workers: The number of workers to use. If set to 1, the processor will be run in the main process.
+        bar: Whether to show a progress bar (package tqdm required).
+        total_items: The total number of items in data. It is required when data is not a sequence.
+        run_name: The name of the run. It is used to construct the checkpoint file path.
+        envs: Additional environment variables for each worker. This will be set before spawning new processes.
+        vars_factory: A function that returns a dictionary of variables to be passed to func. The factory will be called after each process is spawned and before entering the loop.
     """
     # init vars
     if num_workers < 1 or len(envs) and len(envs) != num_workers:
@@ -244,7 +286,7 @@ def iterate_wrapper(
 
     # load checkpoint
     checkpoint_path = ckpt_tmpl.format(name=run_name)
-    checkpoint = load_ckpt(checkpoint_path, restart)
+    checkpoint = _load_ckpt(checkpoint_path, restart)
     if checkpoint is None:
         checkpoint = [0] * num_workers
         with open(checkpoint_path, "w") as f:
@@ -254,11 +296,20 @@ def iterate_wrapper(
 
     # get multiprocessing results
     lock = Lock()
+    if isinstance(output, str) or isinstance(output, TextIO):
+        output_type = "text"
+    elif isinstance(output, BinaryIO):
+        output_type = "binary"
+    else:
+        if output is not None:
+            raise ValueError("output must be a string, a file-like object or None")
+        output_type = "none"
 
-    def get_job_args(i: int):
+    def _get_job_args(i: int):
         return (
             func,
             data,
+            output_type,
             total_items,
             i,
             num_workers,
@@ -274,20 +325,25 @@ def iterate_wrapper(
             vars_factory,
         )
 
-    pool = [Process(target=process_job, args=get_job_args(i)) for i in range(num_workers)]
-    for p in pool:
-        p.start()
-    for p in pool:
-        p.join()
-        p.close()
+    if num_workers > 1:
+        pool = [Process(target=_process_job, args=_get_job_args(i)) for i in range(num_workers)]
+        for p in pool:
+            p.start()
+        for p in pool:
+            p.join()
+            p.close()
+    else:
+        _process_job(*_get_job_args(0))
 
     # merge multiple files
     if isinstance(output, str):
         os.makedirs(os.path.dirname(output), exist_ok=True)
         f = open(output, "w" if restart else "a")
-    else:
+    elif isinstance(output, IO):
         f = output
-    merge_files([output_tmpl.format(name=run_name, id=i) for i in range(num_workers)], f)
+    else:
+        f = None
+    _merge_files([output_tmpl.format(name=run_name, id=i) for i in range(num_workers)], f)
 
     # remove checkpoint file on complete
     try:
@@ -318,26 +374,23 @@ def bind_cache_json(file_path_factory: Callable[[], str]):
 
 
 # testing
-tmp = True
-
-
-def perform_operation(_, item: int, vars):
+def _perform_operation(_, item: int, vars):
     from time import sleep
 
-    global tmp
+    global _tmp
     print(vars)
     sleep(1)
     if item == 0:
-        if tmp:
-            tmp = False
+        if _tmp:
+            _tmp = False
             raise ValueError("here")
 
 
-def test_fn():
+def _test_fn():
     data = list(range(10))
     l = [0, 1]  # noqa: E741
     iterate_wrapper(
-        perform_operation,
+        _perform_operation,
         data,
         "output.txt",
         num_workers=3,
@@ -346,7 +399,7 @@ def test_fn():
     )
 
 
-def test_wrapper():
+def _test_wrapper():
     from time import sleep
 
     for i in IterateWrapper(range(10)):
@@ -354,4 +407,5 @@ def test_wrapper():
 
 
 if __name__ == "__main__":
-    test_fn()
+    _tmp = True
+    _test_fn()
