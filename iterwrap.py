@@ -49,7 +49,7 @@ class IterateWrapper:
         bar=0,
         total_items: int | None = None,
         convert_type=list,
-        run_name="iterwrap",
+        run_name=__name__,
     ):
         """wrap some iterables to provide automatic resuming on interruption, no retrying and limited to sequence
 
@@ -247,11 +247,9 @@ def iterate_wrapper(
     on_error: Literal["raise", "continue"] = "raise",
     num_workers=1,
     bar=True,
-    total_items=None,  # need to provide when data is not a sequence
-    run_name="iterwrap",
-    envs: list[dict[str, str]] = [],  # additional env for each workers
-    # construct vars that will be passed to func, after each process is spawned and before entering the loop
-    # for plain vars, one can simply use closure or functools.partial to pass into func
+    total_items: int | None = None,
+    run_name=__name__,
+    envs: list[dict[str, str]] = [],
     vars_factory: Callable[[], dict[str, Any]] = lambda: {},
 ) -> None:
     """Wrapper on a processor (func) and iterable (data) to support multiprocessing, retrying and automatic resuming.
@@ -268,7 +266,7 @@ def iterate_wrapper(
         total_items: The total number of items in data. It is required when data is not a sequence.
         run_name: The name of the run. It is used to construct the checkpoint file path.
         envs: Additional environment variables for each worker. This will be set before spawning new processes.
-        vars_factory: A function that returns a dictionary of variables to be passed to func. The factory will be called after each process is spawned and before entering the loop.
+        vars_factory: A function that returns a dictionary of variables to be passed to func. The factory will be called after each process is spawned and before entering the loop. For plain vars, one can simply use closure or functools.partial to pass into func.
     """
     # init vars
     if num_workers < 1 or len(envs) and len(envs) != num_workers:
@@ -283,6 +281,13 @@ def iterate_wrapper(
         iterator_mode = True
         data = iter(data)
         assert total_items is not None, "total_items must be provided when data is not a sequence"
+
+    if num_workers > total_items:
+        print(
+            f"Warning: num_workers {num_workers} is greater than total_items {total_items}, "
+            "setting num_workers to total_items."
+        )
+        num_workers = total_items
 
     # load checkpoint
     checkpoint_path = ckpt_tmpl.format(name=run_name)
