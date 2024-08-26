@@ -8,7 +8,7 @@ import os
 import traceback
 import json
 import logging
-from typing import Any, BinaryIO, Callable, Iterable, Iterator, Literal, TextIO, TypeVar, IO, Sequence
+from typing import Any, BinaryIO, Callable, Iterable, Iterator, Literal, TextIO, TypeVar, IO, Sequence, Generic
 from glob import glob
 from itertools import product
 from functools import wraps
@@ -44,10 +44,10 @@ def check_unfinished(run_name: str):
     return False
 
 
-class IterateWrapper:
+class IterateWrapper(Generic[DataType]):
     def __init__(
         self,
-        *data: Any,
+        *data: Iterable[DataType],
         mode: Literal["product", "zip"] = "product",
         restart=False,
         bar=0,
@@ -66,15 +66,10 @@ class IterateWrapper:
             convert_type: convert the data to this type
             run_name: name of the run to identify the checkpoint and output files
         """
-        if len(data) == 1:
-            if convert_type is not None:
-                self.data = convert_type(data[0])
-            else:
-                self.data = data[0]
-        elif mode == "product":
-            self.data = list(product(*data))
+        if mode == "product":
+            self.data: Sequence[DataType] = convert_type(product(*data))
         elif mode == "zip":
-            self.data = list(zip(*data))
+            self.data = convert_type(zip(*data))
         else:
             raise ValueError("mode must be 'product' or 'zip'")
         total_items = total_items if total_items is not None else len(self.data)
