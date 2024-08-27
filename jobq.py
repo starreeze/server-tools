@@ -8,10 +8,12 @@ always beginning from the job with highest orders. Among the same order,
 those jobs with higher gpu demands will be prioritized. If there is no free GPU available,
 it wait until there are enough free GPUs to execute the job.
 It will automatically set the environment variable `CUDA_AVAILABLE_DEVICES` to the free GPU IDs when run the job.
+If `-s` is set, the program will automatically split the job into multiple jobs with 1 gpu for each.
+Make sure that your program accepts `start_pos` and `end_pos`, and your output filename is dependent on them.
 The output of the jobs will be both logged to the console and a file.
 
 It support the following operations:
-1. add: `python jobq.py add [job_cmd] [-n n_gpus_required] [-o job_order]`.
+1. add: `python jobq.py add [job_cmd] [-n n_gpus_required] [-o job_order] [-s total_samples]`.
     Add a job to the queue with command to be executed with os.system(job_cmd).
 2. list: `python jobq.py ls`. List all jobs in the queue, including an ID
     (which is a unique integer, starting from 0 and adds 1 for each job),
@@ -25,26 +27,33 @@ It support the following operations:
 """
 
 from __future__ import annotations
-import sys, os, datetime, json, subprocess, time, logging
-from typing import Iterable, Any
-from argparse import ArgumentParser
-from multiprocessing import Process
 
+import datetime
+import json
+import logging
+import os
+import subprocess
+import sys
+import time
+from argparse import ArgumentParser
+from copy import deepcopy
+from multiprocessing import Process
+from typing import Any, Iterable
+
+from rich.logging import RichHandler
+
+# package info
+__version__ = "0.1.4"
+__author__ = "Starreeze"
+__license__ = "GPLv3"
+__url__ = "https://github.com/starreeze/server-tools"
+
+logging.basicConfig(level=logging.INFO, format="%(message)s", datefmt="[%X]", handlers=[RichHandler()])
+_logger = logging.getLogger("rich")
+
+# default path
 output_dir = os.path.expanduser("/home/nfs04/xingsy/logs/jq_output")
 status_path = os.path.expanduser("/home/nfs04/xingsy/logs/jq_status.json")
-logger = logging.getLogger()
-
-
-def setup_logger():
-    log_format = "%(asctime)s --- %(levelname)s: %(message)s"
-    formatter = logging.Formatter(fmt=log_format, datefmt="%Y-%m-%d %H:%M:%S")
-    logger.setLevel(logging.DEBUG)
-    stream_handler = logging.StreamHandler()
-    stream_handler.setFormatter(formatter)
-    logger.addHandler(stream_handler)
-    file_handler = logging.FileHandler(os.path.join(output_dir, "jq.log"))
-    file_handler.setFormatter(formatter)
-    logger.addHandler(file_handler)
 
 
 class GPUManager:
@@ -56,19 +65,19 @@ class GPUManager:
 
     def update_gpu_status(self, interval: int) -> None:
         if not self.gpu_pending:
-            logger.debug(f"gpu available: {self.gpu_avail}, pending: {self.gpu_pending}, inuse: {self.gpu_inuse}")
+            _logger.debug(f"gpu available: {self.gpu_avail}, pending: {self.gpu_pending}, inuse: {self.gpu_inuse}")
             return
         try:
             gpustat_output = subprocess.check_output(["gpustat", "--json"], text=True)
         except subprocess.CalledProcessError:
-            logger.error("Error running gpustat.")
+            _logger.error("Error running gpustat.")
             return
         gpu_data = json.loads(gpustat_output)
         current_time = datetime.datetime.now()
         for gpu_id, gpu in enumerate(gpu_data["gpus"]):
             if gpu["memory.used"] < 1000 and gpu["utilization.gpu"] == 0:
                 if gpu_id in self.gpu_pending:
-                    logger.info(f"find free gpu: {gpu_id}")
+                    _logger.info(f"find free gpu: {gpu_id}")
                     if interval == 0:
                         self.gpu_avail.add(gpu_id)
                         self.gpu_pending.remove(gpu_id)
@@ -83,7 +92,7 @@ class GPUManager:
                 if gpu_id in self.gpu_avail:
                     self.gpu_avail.remove(gpu_id)
                     self.gpu_pending.add(gpu_id)
-        logger.debug(f"gpu available: {self.gpu_avail}, pending: {self.gpu_pending}, inuse: {self.gpu_inuse}")
+        _logger.debug(f"gpu available: {self.gpu_avail}, pending: {self.gpu_pending}, inuse: {self.gpu_inuse}")
 
     def allocate(self, job_id: int, ngpu: int) -> list[int] | None:
         "Allocate gpus according to number of gpus needed. Return None if no available."
@@ -117,8 +126,8 @@ class JobQueue:
         with open(self.filename, "w") as file:
             json.dump(job_queue, file)
 
-    def add(self, args):
-        job_queue = self.load()
+    @staticmethod
+    def add_single(args, job_queue: list[dict[str, Any]]):
         job_id = max([job["id"] for job in job_queue], default=-1) + 1 if args.id == -1 else args.id
         current_dir = os.getcwd()
         job = {
@@ -130,8 +139,26 @@ class JobQueue:
             "dir": current_dir,
         }
         job_queue.append(job)
+        _logger.info(f"Added job {job_id}.")
+
+    def add(self, args):
+        job_queue = self.load()
+        if args.separate_total:
+            chunk_size = (args.separate_total - 1 + args.ngpu) // args.ngpu
+            for i in range(args.ngpu):
+                separate_args = deepcopy(args)
+                add_args = [
+                    "--start_pos",
+                    str(i * chunk_size),
+                    "--end_pos",
+                    str(min((i + 1) * chunk_size, args.separate_total)),
+                ]
+                separate_args.cmd.extend(add_args)
+                separate_args.ngpu = 1
+                self.add_single(separate_args, job_queue)
+        else:
+            self.add_single(args, job_queue)
         self.save(job_queue)
-        print(f"Added job {job_id}.")
 
     def list(self):
         job_queue = self.load()
@@ -171,9 +198,9 @@ class JobQueue:
                 if proc.wait() != 0:
                     raise subprocess.CalledProcessError(proc.returncode, job["command"])
 
-            logger.info(f"Job {job['id']} executed successfully.")
+            _logger.info(f"Job {job['id']} executed successfully.")
         except subprocess.CalledProcessError as e:
-            logger.error(f"Job {job['id']} failed to execute. Error: {e}")
+            _logger.error(f"Job {job['id']} failed to execute. Error: {e}")
 
     def daemon(self, args):
         while True:
@@ -181,7 +208,7 @@ class JobQueue:
             for job_id, process in self.running_jobs.copy().items():
                 if not process.is_alive():
                     freed = self.gpu_manager.free(job_id)
-                    logger.info(f"job {job_id} finished, gpu {freed} is now available.")
+                    _logger.info(f"job {job_id} finished, gpu {freed} is now available.")
                     process.join()
                     self.running_jobs.pop(job_id)
 
@@ -197,7 +224,7 @@ class JobQueue:
                 gpus = self.gpu_manager.allocate(job["id"], job["ngpu"])
                 if gpus is None:
                     continue
-                logger.info(f"starting job {job['id']} on gpu {gpus}")
+                _logger.info(f"starting job {job['id']} on gpu {gpus}")
                 process = Process(target=self.execute, args=(job, gpus))
                 self.running_jobs[job["id"]] = process
                 process.start()
@@ -208,15 +235,14 @@ class JobQueue:
                     del job_queue[i]
                 self.save(job_queue)
             else:
-                logger.info(f"No available gpu.")
+                _logger.info(f"No available gpu.")
 
             time.sleep(args.frequency)
 
     def start(self, args):
         os.makedirs(output_dir, exist_ok=True)
-        setup_logger()
         self.gpu_manager = GPUManager(args.gpus)
-        logger.info("Daemon started.")
+        _logger.info("Daemon started.")
         self.daemon(args)
 
 
@@ -226,7 +252,7 @@ class ArgParser:
 
     def parse_start(self):
         parser = ArgumentParser()
-        parser.add_argument("--gpus", "-g", type=int, nargs="+", default=[0, 1, 2, 3])
+        parser.add_argument("--gpus", "-g", type=int, nargs="+", default=[0, 1, 2, 3, 4, 5, 6, 7])
         parser.add_argument("--interval", "-i", type=int, default=0, help="wait time before using a gpu")
         parser.add_argument("--frequency", "-f", type=int, default=30, help="frequency to check for gpu")
         return parser.parse_args(self.args)
@@ -235,6 +261,13 @@ class ArgParser:
         parser = ArgumentParser()
         parser.add_argument("cmd", nargs="+", help="the full command for this job")
         parser.add_argument("--ngpu", "-n", type=int, default=1, help="number of gpus needed for this job")
+        parser.add_argument(
+            "--separate_total",
+            "-s",
+            type=int,
+            default=0,
+            help="total size of samples. If >0, run the job in separate processes, each allocating a gpu",
+        )
         parser.add_argument("--order", "-o", type=int, default=0, help="the order of this job")
         parser.add_argument("--id", "-i", type=int, default=-1, help="the id of this job")
         known_args, unknown_args = parser.parse_known_args(self.args)

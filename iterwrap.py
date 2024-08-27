@@ -4,18 +4,31 @@
 """wrapper on an iterable to allow interruption & auto resume, retrying and multiprocessing"""
 
 from __future__ import annotations
-import os
-import traceback
+
 import json
 import logging
-from typing import Any, BinaryIO, Callable, Iterable, Iterator, Literal, TextIO, TypeVar, IO, Sequence, Generic
+import os
+import traceback
+from functools import wraps
 from glob import glob
 from itertools import product
-from functools import wraps
 from multiprocessing import Lock, Process, synchronize
+from typing import (
+    IO,
+    Any,
+    BinaryIO,
+    Callable,
+    Generic,
+    Iterable,
+    Iterator,
+    Literal,
+    Sequence,
+    TextIO,
+    TypeVar,
+)
 
 # package info
-__name__ = __file__.split("/")[-1].split(".")[0]
+# __name__ = __file__.split("/")[-1].split(".")[0]
 __version__ = "0.1.4"
 __author__ = "Starreeze"
 __license__ = "GPLv3"
