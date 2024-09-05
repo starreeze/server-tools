@@ -27,13 +27,13 @@ from typing import (
     TypeVar,
 )
 
+from tqdm import tqdm
+
 # package info
-# __name__ = __file__.split("/")[-1].split(".")[0]
-__version__ = "0.1.4"
+__version__ = "0.1.5"
 __author__ = "Starreeze"
 __license__ = "GPLv3"
 __url__ = "https://github.com/starreeze/server-tools"
-_logger = logging.getLogger(__name__)
 
 # default file path
 output_tmpl = "{name}_p{id}.output"
@@ -41,6 +41,27 @@ ckpt_tmpl = "{name}.ckpt"
 
 # type
 DataType = TypeVar("DataType")
+
+
+class TqdmLoggingHandler(logging.Handler):
+    def emit(self, record):
+        try:
+            msg = self.format(record)
+            tqdm.write(msg)
+        except Exception:
+            self.handleError(record)
+
+
+def setup_tqdm_logger(name=__name__, fmt="%(asctime)s - %(levelname)s - %(message)s"):
+    logger = logging.getLogger(name)
+    handler = TqdmLoggingHandler()
+    formatter = logging.Formatter(fmt)
+    handler.setFormatter(formatter)
+    logger.addHandler(handler)
+    return logger
+
+
+_logger = setup_tqdm_logger()
 
 
 def check_unfinished(run_name: str):
@@ -95,8 +116,6 @@ class IterateWrapper(Generic[DataType]):
         except FileNotFoundError:
             checkpoint = 0
         if bar >= 0:
-            from tqdm import tqdm
-
             self.wrapped_range = tqdm(
                 range(checkpoint, total_items),
                 initial=checkpoint,
@@ -151,6 +170,7 @@ def retry_dec(retry=5, on_error: Literal["raise", "continue"] = "raise"):
                             )
                             return
                     _logger.warning(f"{type(e).__name__}: {e}, retrying [{j + 1}]...")
+                    _logger.debug(traceback.format_exc())
 
         return wrapper
 
@@ -194,6 +214,7 @@ def _process_job(
     retry,
     on_error,
     bar,
+    flush,
     envs: dict[str, str] | None,
     vars_factory: Callable[[], dict[str, Any]],
 ):
@@ -210,8 +231,6 @@ def _process_job(
     range_to_process = range(checkpoint, end_pos)
     range_checkpointed = range(start_pos, checkpoint)
     if bar:
-        from tqdm import tqdm
-
         range_to_process = tqdm(
             range_to_process,
             initial=checkpoint - start_pos,
@@ -242,6 +261,8 @@ def _process_job(
             assert isinstance(data, Sequence)
             item = data[i]
         retry_func(output, item, vars)
+        if output is not None and flush:
+            output.flush()
         _write_ckpt(ckpt_tmpl.format(name=run_name), i + 1 - start_pos, process_idx, lock)
     if output is not None:
         output.close()
@@ -266,6 +287,7 @@ def iterate_wrapper(
     on_error: Literal["raise", "continue"] = "raise",
     num_workers=1,
     bar=True,
+    flush=True,
     total_items: int | None = None,
     run_name=__name__,
     envs: list[dict[str, str]] = [],
@@ -282,6 +304,7 @@ def iterate_wrapper(
         on_error: The action to take when an error occurs.
         num_workers: The number of workers to use. If set to 1, the processor will be run in the main process.
         bar: Whether to show a progress bar (package tqdm required).
+        flush: Whether to flush the output stream after each data item is processed.
         total_items: The total number of items in data. It is required when data is not a sequence.
         run_name: The name of the run. It is used to construct the checkpoint file path.
         envs: Additional environment variables for each worker. This will be set before spawning new processes.
@@ -345,6 +368,7 @@ def iterate_wrapper(
             retry,
             on_error,
             bar,
+            flush,
             os.environ | (envs[i] if len(envs) else {}),
             vars_factory,
         )
