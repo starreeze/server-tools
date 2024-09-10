@@ -19,7 +19,7 @@ It support the following operations:
     (which is a unique integer, starting from 0 and adds 1 for each job),
     the datetime upon creation, job command, and the gpu requirement.
 3. delete: `python jobq.py del [job_id]`. Delete a job from the queue by its ID.
-4. start: `python jobq.py start [-g gpus_to_be_used] [-i wait_time_before_using_a_free_gpu]
+4. start: `python jobq.py start [-g gpus_to_be_used] [-i wait_time_before_using_a_free_gpu] [-j jobs included]
     [-f pool_frequency_for_checking_gpu_availability]`.
     Start a daemon to run the jobs in the queue. The daemon should run indefinitely until stopped manually.
     Note that even after the daemon is started, you can still modify the job queue,
@@ -43,7 +43,7 @@ from typing import Any, Iterable
 from rich.logging import RichHandler
 
 # package info
-__version__ = "0.1.4"
+__version__ = "0.1.5"
 __author__ = "Starreeze"
 __license__ = "GPLv3"
 __url__ = "https://github.com/starreeze/server-tools"
@@ -176,7 +176,7 @@ class JobQueue:
 
     def execute(self, job: dict[str, Any], gpus: list[int]):
         env = os.environ.copy()
-        env["CUDA_VISIBLE_DEVICES"] = ",".join(map(str, gpus))
+        env["CUDA_VISIBLE_DEVICES"] = ",".join(map(str, gpus)) if gpus else "-1"
         output_file = os.path.join(output_dir, f"job_{job['id']}_output.txt")
         os.chdir(job["dir"])  # chdir in subprocess will not change the dir of main process
         try:
@@ -216,11 +216,15 @@ class JobQueue:
             if len(job_queue) == 0:
                 time.sleep(args.frequency)
                 continue
+            if len(args.jobs) == 0:
+                args.jobs = [job["id"] for job in job_queue]
 
             # start new jobs
             self.gpu_manager.update_gpu_status(args.interval)
             started_job_idx = []
             for i, job in enumerate(job_queue):
+                if job["id"] not in args.jobs:
+                    continue
                 gpus = self.gpu_manager.allocate(job["id"], job["ngpu"])
                 if gpus is None:
                     continue
@@ -253,6 +257,7 @@ class ArgParser:
     def parse_start(self):
         parser = ArgumentParser()
         parser.add_argument("--gpus", "-g", type=int, nargs="+", default=[0, 1, 2, 3, 4, 5, 6, 7])
+        parser.add_argument("--jobs", "-j", type=int, nargs="+", default=[], help="select which jobs to include")
         parser.add_argument("--interval", "-i", type=int, default=0, help="wait time before using a gpu")
         parser.add_argument("--frequency", "-f", type=int, default=30, help="frequency to check for gpu")
         return parser.parse_args(self.args)
