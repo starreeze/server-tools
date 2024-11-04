@@ -392,6 +392,8 @@ def iterate_wrapper(
     else:
         f = None
     _merge_files([output_tmpl.format(name=run_name, id=i) for i in range(num_workers)], f)
+    if f is not None:
+        f.close()
 
     # remove checkpoint file on complete
     try:
