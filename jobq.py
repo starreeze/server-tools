@@ -29,6 +29,7 @@ It support the following operations:
 from __future__ import annotations
 
 import datetime
+import glob
 import json
 import logging
 import os
@@ -40,6 +41,7 @@ from copy import deepcopy
 from multiprocessing import Process
 from typing import Any, Iterable
 
+from natsort import natsorted
 from rich.logging import RichHandler
 
 # package info
@@ -57,11 +59,12 @@ status_path = os.path.expanduser("/home/nfs04/xingsy/logs/jq_status.json")
 
 
 class GPUManager:
-    def __init__(self, gpus: Iterable[int]) -> None:
+    def __init__(self, gpus: Iterable[int], max_used_mem_mb: int) -> None:
         self.gpu_avail: set[int] = set()
         self.gpu_pending: set[int] = set(gpus)
         self.gpu_inuse: dict[int, set[int]] = {}  # job_id -> {gpu_id}
         self.gpu_free_since: dict[int, datetime.datetime] = {}  # gpu_id -> timestamp
+        self.max_used_mem_mb = max_used_mem_mb
 
     def update_gpu_status(self, interval: int) -> None:
         if not self.gpu_pending:
@@ -75,7 +78,7 @@ class GPUManager:
         gpu_data = json.loads(gpustat_output)
         current_time = datetime.datetime.now()
         for gpu_id, gpu in enumerate(gpu_data["gpus"]):
-            if gpu["memory.used"] < 1000 and gpu["utilization.gpu"] == 0:
+            if gpu["memory.used"] < self.max_used_mem_mb and gpu["utilization.gpu"] == 0:
                 if gpu_id in self.gpu_pending:
                     _logger.info(f"find free gpu: {gpu_id}")
                     if interval == 0:
@@ -174,6 +177,10 @@ class JobQueue:
         self.save(job_queue)
         print(f"Deleted job {job_id}.")
 
+    def clear(self):
+        self.save([])
+        print("Cleared all jobs.")
+
     def execute(self, job: dict[str, Any], gpus: list[int]):
         env = os.environ.copy()
         env["CUDA_VISIBLE_DEVICES"] = ",".join(map(str, gpus)) if gpus else "-1"
@@ -245,7 +252,7 @@ class JobQueue:
 
     def start(self, args):
         os.makedirs(output_dir, exist_ok=True)
-        self.gpu_manager = GPUManager(args.gpus)
+        self.gpu_manager = GPUManager(args.gpus, args.max_used_mem_mb)
         _logger.info("Daemon started.")
         self.daemon(args)
 
@@ -260,6 +267,9 @@ class ArgParser:
         parser.add_argument("--jobs", "-j", type=int, nargs="+", default=[], help="select which jobs to include")
         parser.add_argument("--interval", "-i", type=int, default=0, help="wait time before using a gpu")
         parser.add_argument("--frequency", "-f", type=int, default=30, help="frequency to check for gpu")
+        parser.add_argument(
+            "--max_used_mem_mb", "-m", type=int, default=1000, help="if memory usage > this, gpu is not used"
+        )
         return parser.parse_args(self.args)
 
     def parse_add(self):
@@ -279,12 +289,30 @@ class ArgParser:
         known_args.cmd.extend(unknown_args)
         return known_args
 
+    def parse_merge(self):
+        parser = ArgumentParser()
+        parser.add_argument("--input", "-i", type=str, nargs="+", default=[], help="input files to be merged")
+        parser.add_argument("--output", "-o", type=str, required=True, help="the output file name")
+        args = parser.parse_args(self.args)
+        input_files = natsorted([glob.glob(input_file) for input_file in args.input])
+        args.input = input_files
+        return args
+
 
 def print_help(invalid: bool):
     if invalid:
         print("Invalid arguments.")
     print("Usage:")
     print(__doc__)
+
+
+def merge(args):
+    with open(args.output, "w") as file:
+        for input_file in args.input:
+            with open(input_file, "r") as f:
+                content = f.read()
+                # content = content.strip("\n") + "\n"
+                file.write(content)
 
 
 def main():
@@ -300,9 +328,17 @@ def main():
         queue.list()
     elif op == "del" and args:
         for id in args:
-            queue.delete(int(id))
+            if id == "all":
+                queue.clear()
+                break
+            else:
+                queue.delete(int(id))
     elif op == "start":
         queue.start(parser.parse_start())
+    elif op == "merge":
+        merge(parser.parse_merge())
+    elif op == "clear":
+        queue.clear()
     else:
         print_help(invalid=not ("-h" in sys.argv[1] or "help" in sys.argv[1]))
 
