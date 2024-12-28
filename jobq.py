@@ -45,7 +45,7 @@ from natsort import natsorted
 from rich.logging import RichHandler
 
 # package info
-__version__ = "0.1.5"
+__version__ = "0.1.6"
 __author__ = "Starreeze"
 __license__ = "GPLv3"
 __url__ = "https://github.com/starreeze/server-tools"
@@ -294,7 +294,7 @@ class ArgParser:
         parser.add_argument("--input", "-i", type=str, nargs="+", default=[], help="input files to be merged")
         parser.add_argument("--output", "-o", type=str, required=True, help="the output file name")
         args = parser.parse_args(self.args)
-        input_files = natsorted([glob.glob(input_file) for input_file in args.input])
+        input_files = natsorted(sum([glob.glob(input_file) for input_file in args.input], []))
         args.input = input_files
         return args
 
