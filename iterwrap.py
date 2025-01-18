@@ -27,12 +27,13 @@ from typing import (
     Sequence,
     TextIO,
     TypeVar,
+    cast,
 )
 
 from tqdm import tqdm
 
 # package info
-__version__ = "0.1.7"
+__version__ = "0.1.8"
 __author__ = "Starreeze"
 __license__ = "GPLv3"
 __url__ = "https://github.com/starreeze/server-tools"
@@ -215,8 +216,6 @@ def _process_job(
     run_name,
     checkpoint,
     restart,
-    retry,
-    on_error,
     bar,
     flush,
     envs: dict[str, str] | None,
@@ -248,10 +247,9 @@ def _process_job(
         assert isinstance(data, Iterator)
         for i in range_checkpointed:
             next(data)
-
-    retry_func = retry_dec(retry, on_error)(func)
     open_flags = ("w" if restart else "a") + ("b" if output_type == "binary" else "")
     output = open(output_tmpl.format(name=run_name, id=process_idx), open_flags) if output_type != "none" else None
+
     _logger.debug(f"{process_idx}: processing data from {checkpoint} to {end_pos}")
 
     returns = []
@@ -266,7 +264,7 @@ def _process_job(
         else:
             assert isinstance(data, Sequence)
             item = data[i]
-        returns.append(retry_func(output, item, vars))
+        returns.append(func(output, item, vars))  # type: ignore
         if output is not None and flush:
             output.flush()
         _write_ckpt(ckpt_tmpl.format(name=run_name), i + 1 - start_pos, process_idx, lock)
@@ -300,7 +298,11 @@ def _merge_files(input_paths: list[str], output_stream: IO | None):
 
 
 def iterate_wrapper(
-    func: Callable[Concatenate[IO, DataType, dict[str, Any], ParamTypes], ReturnType],
+    func: (
+        Callable[Concatenate[DataType, ParamTypes], ReturnType]
+        | Callable[Concatenate[IO, DataType, ParamTypes], ReturnType]
+        | Callable[Concatenate[IO, DataType, dict[str, Any], ParamTypes], ReturnType]
+    ),
     data: Iterable[DataType],
     output: str | IO | None = None,
     restart=False,
@@ -386,9 +388,21 @@ def iterate_wrapper(
             raise ValueError("output must be a string, a file-like object or None")
         output_type = "none"
 
+    partial_func = partial(func, *args, **kwargs)
+    match func.__code__.co_argcount - len(args) - len(kwargs):
+        case 1:  # data_item only
+            matched_func = lambda io, data_item, vars: partial_func(data_item)  # type: ignore
+        case 2:  # io, data_item
+            matched_func = lambda io, data_item, vars: partial_func(io, data_item)  # type: ignore
+        case 3:  # io, data_item, vars
+            matched_func = partial_func
+        case _:
+            raise ValueError(f"func must accept 1, 2 or 3 arguments, got {func.__code__.co_argcount}")
+    retry_func = cast(Callable[[IO, DataType, dict[str, Any]], ReturnType], retry_dec(retry, on_error)(matched_func))
+
     def _get_job_args(i: int):
         return (
-            partial(func, *args, **kwargs),
+            retry_func,
             data,
             output_type,
             total_items,
@@ -399,8 +413,6 @@ def iterate_wrapper(
             run_name,
             checkpoint[i],
             restart,
-            retry,
-            on_error,
             bar,
             flush,
             os.environ | (envs[i] if len(envs) else {}),
@@ -471,30 +483,26 @@ def bind_cache_json(file_path_factory: Callable[[], str]):
 
 
 # testing
-def _perform_operation(_, item: int, vars: dict, sleep_time: float):
+def _perform_operation(item: int, sleep_time: float):
     from time import sleep
 
     global _tmp
-    print(vars)
     sleep(sleep_time)
     if item == 0:
         if _tmp:
             _tmp = False
             raise ValueError("here")
-    return vars
+    return item * item
 
 
 def _test_fn():
     data = list(range(10))
-    l = [0, 1]  # noqa: E741
     num_workers = 3
     returns = iterate_wrapper(
         _perform_operation,
         data,
         "output.txt",
         num_workers=num_workers,
-        envs=[{"id": str(i)} for i in range(num_workers)],
-        vars_factory=lambda: {"a": l + [os.environ["id"]]},
         sleep_time=1,
     )
     print(returns)
