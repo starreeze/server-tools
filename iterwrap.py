@@ -321,7 +321,7 @@ def iterate_wrapper(
     """Wrapper on a processor (func) and iterable (data) to support multiprocessing, retrying and automatic resuming.
 
     Args:
-        func: The processor function. It should accept three or more arguments: output stream, data item, vars, and additional args (*args and **kwargs, which should be passed to the wrapper). Within func, the output stream can be used to save data in real time.
+        func: The processor function. It should accept the following argument patterns: data item only; output stream, data item; output stream, data item, vars. Additional args (*args and **kwargs) can be added in func, which should be passed to the wrapper. Within func, the output stream can be used to save data in real time. See `vars_factory` for the usage of `vars`.
         data: The data to be processed. It can be an iterable or a sequence. In each iteration, the data item in data will be passed to func.
         output: The output stream. It can be a file path, a file object or None. If None, no output will be written.
         restart: Whether to restart from the beginning.
@@ -333,7 +333,7 @@ def iterate_wrapper(
         total_items: The total number of items in data. It is required when data is not a sequence.
         run_name: The name of the run. It is used to construct the checkpoint file path.
         envs: Additional environment variables for each worker. This will be set before spawning new processes.
-        vars_factory: A function that returns a dictionary of variables to be passed to func. The factory will be called after each process is spawned and before entering the loop. For plain vars, one can simply use closure or functools.partial to pass into func.
+        vars_factory: A callable that returns a dictionary of variables to be passed to func. The factory will be called after each process is spawned and before entering the loop. For plain vars, include them in *args and **kwargs.
         *args: Additional positional arguments to be passed to func.
         **kwargs: Additional keyword arguments to be passed to func.
 
@@ -397,7 +397,9 @@ def iterate_wrapper(
         case 3:  # io, data_item, vars
             matched_func = partial_func
         case _:
-            raise ValueError(f"func must accept 1, 2 or 3 arguments, got {func.__code__.co_argcount}")
+            raise ValueError(
+                f"func must accept 1, 2 or 3 arguments, got {func.__code__.co_argcount - len(args) - len(kwargs)}"
+            )
     retry_func = cast(Callable[[IO, DataType, dict[str, Any]], ReturnType], retry_dec(retry, on_error)(matched_func))
 
     def _get_job_args(i: int):
