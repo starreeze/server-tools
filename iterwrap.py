@@ -9,19 +9,21 @@ import json
 import logging
 import os
 import traceback
-from functools import wraps
+from functools import partial, wraps
 from glob import glob
 from itertools import product
-from multiprocessing import Lock, Process, synchronize
+from multiprocessing import Lock, Process, Queue, synchronize
 from typing import (
     IO,
     Any,
     BinaryIO,
     Callable,
+    Concatenate,
     Generic,
     Iterable,
     Iterator,
     Literal,
+    ParamSpec,
     Sequence,
     TextIO,
     TypeVar,
@@ -30,7 +32,7 @@ from typing import (
 from tqdm import tqdm
 
 # package info
-__version__ = "0.1.5"
+__version__ = "0.1.7"
 __author__ = "Starreeze"
 __license__ = "GPLv3"
 __url__ = "https://github.com/starreeze/server-tools"
@@ -40,7 +42,9 @@ output_tmpl = "{name}_p{id}.output"
 ckpt_tmpl = "{name}.ckpt"
 
 # type
-DataType = TypeVar("DataType")
+DataType = TypeVar("DataType")  # the data type of the items to be processed
+ReturnType = TypeVar("ReturnType")  # the data type of the items to be returned
+ParamTypes = ParamSpec("ParamTypes")  # the additional parameters of the processor function
 
 
 class TqdmLoggingHandler(logging.Handler):
@@ -200,7 +204,7 @@ def _write_ckpt(path: str, checkpoint: int, process_idx: int, lock: synchronize.
 
 
 def _process_job(
-    func: Callable[[IO, DataType, dict[str, Any]], None],
+    func: Callable[[IO, DataType, dict[str, Any]], ReturnType],
     data: Iterator[DataType] | Sequence[DataType],
     output_type: Literal["text", "binary", "none"],
     total_items: int,
@@ -217,7 +221,7 @@ def _process_job(
     flush,
     envs: dict[str, str] | None,
     vars_factory: Callable[[], dict[str, Any]],
-):
+) -> Sequence[ReturnType]:
     if envs is not None:
         for k, v in envs.items():
             os.environ[k] = v
@@ -249,6 +253,8 @@ def _process_job(
     open_flags = ("w" if restart else "a") + ("b" if output_type == "binary" else "")
     output = open(output_tmpl.format(name=run_name, id=process_idx), open_flags) if output_type != "none" else None
     _logger.debug(f"{process_idx}: processing data from {checkpoint} to {end_pos}")
+
+    returns = []
     for i in range_to_process:
         _logger.debug(f"{process_idx}: processing data {i}")
         if iterator_mode:
@@ -260,12 +266,28 @@ def _process_job(
         else:
             assert isinstance(data, Sequence)
             item = data[i]
-        retry_func(output, item, vars)
+        returns.append(retry_func(output, item, vars))
         if output is not None and flush:
             output.flush()
         _write_ckpt(ckpt_tmpl.format(name=run_name), i + 1 - start_pos, process_idx, lock)
     if output is not None:
         output.close()
+    return returns
+
+
+class WorkerProcess(Process):
+    def __init__(self, *args, **kwargs):
+        super().__init__()
+        self.args = args
+        self.kwargs = kwargs
+        self.queue = Queue()  # Add queue for communication
+
+    def run(self):
+        returns = _process_job(*self.args, **self.kwargs)
+        self.queue.put(returns)  # Put results in queue
+
+    def get_returns(self):
+        return self.queue.get()  # Get results from queue
 
 
 def _merge_files(input_paths: list[str], output_stream: IO | None):
@@ -278,10 +300,9 @@ def _merge_files(input_paths: list[str], output_stream: IO | None):
 
 
 def iterate_wrapper(
-    func: Callable[[IO, DataType, dict[str, Any]], None],
+    func: Callable[Concatenate[IO, DataType, dict[str, Any], ParamTypes], ReturnType],
     data: Iterable[DataType],
     output: str | IO | None = None,
-    *,
     restart=False,
     retry=5,
     on_error: Literal["raise", "continue"] = "raise",
@@ -292,16 +313,18 @@ def iterate_wrapper(
     run_name=__name__,
     envs: list[dict[str, str]] = [],
     vars_factory: Callable[[], dict[str, Any]] = lambda: {},
-) -> None:
+    *args: ParamTypes.args,
+    **kwargs: ParamTypes.kwargs,
+) -> Sequence[ReturnType] | None:
     """Wrapper on a processor (func) and iterable (data) to support multiprocessing, retrying and automatic resuming.
 
     Args:
-        func: The processor function. It should accept three arguments: output stream, data item and vars. Within func, the output stream can be used to save data in real time.
-        data: The data to be processed. It can be an iterable or a sequence.
+        func: The processor function. It should accept three or more arguments: output stream, data item, vars, and additional args (*args and **kwargs, which should be passed to the wrapper). Within func, the output stream can be used to save data in real time.
+        data: The data to be processed. It can be an iterable or a sequence. In each iteration, the data item in data will be passed to func.
         output: The output stream. It can be a file path, a file object or None. If None, no output will be written.
         restart: Whether to restart from the beginning.
         retry: The number of retries for processing each data item.
-        on_error: The action to take when an error occurs.
+        on_error: The action to take when an exception is raised in func.
         num_workers: The number of workers to use. If set to 1, the processor will be run in the main process.
         bar: Whether to show a progress bar (package tqdm required).
         flush: Whether to flush the output stream after each data item is processed.
@@ -309,6 +332,11 @@ def iterate_wrapper(
         run_name: The name of the run. It is used to construct the checkpoint file path.
         envs: Additional environment variables for each worker. This will be set before spawning new processes.
         vars_factory: A function that returns a dictionary of variables to be passed to func. The factory will be called after each process is spawned and before entering the loop. For plain vars, one can simply use closure or functools.partial to pass into func.
+        *args: Additional positional arguments to be passed to func.
+        **kwargs: Additional keyword arguments to be passed to func.
+
+    Returns:
+        A list of return values from func.
     """
     # init vars
     if num_workers < 1 or len(envs) and len(envs) != num_workers:
@@ -338,8 +366,14 @@ def iterate_wrapper(
         checkpoint = [0] * num_workers
         with open(checkpoint_path, "w") as f:
             f.write("\n".join(map(str, checkpoint)))
-    elif len(checkpoint) != num_workers:
-        raise ValueError(f"checkpoint length {len(checkpoint)} does not match num_workers {num_workers}!")
+        return_flag = True
+    else:
+        if len(checkpoint) != num_workers:
+            raise ValueError(f"checkpoint length {len(checkpoint)} does not match num_workers {num_workers}!")
+        max_split = (total_items + num_workers - 1) // num_workers
+        if not all(map(lambda x: 0 <= x < max_split, checkpoint)):
+            raise ValueError(f"checkpoint must be a list of non-negative integers less than max_split {max_split}")
+        return_flag = False
 
     # get multiprocessing results
     lock = Lock()
@@ -354,7 +388,7 @@ def iterate_wrapper(
 
     def _get_job_args(i: int):
         return (
-            func,
+            partial(func, *args, **kwargs),
             data,
             output_type,
             total_items,
@@ -374,18 +408,22 @@ def iterate_wrapper(
         )
 
     if num_workers > 1:
-        pool = [Process(target=_process_job, args=_get_job_args(i)) for i in range(num_workers)]
+        returns = []
+        pool = [WorkerProcess(*_get_job_args(i)) for i in range(num_workers)]
         for p in pool:
             p.start()
         for p in pool:
             p.join()
+            returns.extend(p.get_returns())  # Get results from queue
             p.close()
     else:
-        _process_job(*_get_job_args(0))
+        returns = _process_job(*_get_job_args(0))
 
     # merge multiple files
     if isinstance(output, str):
-        os.makedirs(os.path.dirname(output), exist_ok=True)
+        dir = os.path.dirname(output)
+        if dir and not os.path.exists(dir):
+            os.makedirs(dir, exist_ok=True)
         f = open(output, "w" if restart else "a")
     elif isinstance(output, IO):
         f = output
@@ -400,6 +438,15 @@ def iterate_wrapper(
         os.remove(checkpoint_path)
     except FileNotFoundError:
         pass
+
+    if return_flag:
+        return returns
+    if returns[0] is not None:
+        _logger.warning(
+            "The run is once interrupted and the return value is incomplete. "
+            "You can safely ignore this if you save your results in real-time."
+        )
+    return None
 
 
 def bind_cache_json(file_path_factory: Callable[[], str]):
@@ -424,29 +471,33 @@ def bind_cache_json(file_path_factory: Callable[[], str]):
 
 
 # testing
-def _perform_operation(_, item: int, vars):
+def _perform_operation(_, item: int, vars: dict, sleep_time: float):
     from time import sleep
 
     global _tmp
     print(vars)
-    sleep(1)
+    sleep(sleep_time)
     if item == 0:
         if _tmp:
             _tmp = False
             raise ValueError("here")
+    return vars
 
 
 def _test_fn():
     data = list(range(10))
     l = [0, 1]  # noqa: E741
-    iterate_wrapper(
+    num_workers = 3
+    returns = iterate_wrapper(
         _perform_operation,
         data,
         "output.txt",
-        num_workers=3,
-        envs=[{"id": str(i)} for i in range(3)],
+        num_workers=num_workers,
+        envs=[{"id": str(i)} for i in range(num_workers)],
         vars_factory=lambda: {"a": l + [os.environ["id"]]},
+        sleep_time=1,
     )
+    print(returns)
 
 
 def _test_wrapper():
