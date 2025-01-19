@@ -13,6 +13,7 @@ from functools import partial, wraps
 from glob import glob
 from itertools import product
 from multiprocessing import Lock, Process, Queue, synchronize
+from time import sleep
 from typing import (
     IO,
     Any,
@@ -150,7 +151,7 @@ class IterateWrapper(Generic[DataType]):
         return self.data[self.index]
 
 
-def retry_dec(retry=5, on_error: Literal["raise", "continue"] = "raise"):
+def retry_dec(retry=5, wait=1, on_error: Literal["raise", "continue"] = "raise"):
     "decorator for retrying a function on exception; on_error could be raise or continue"
 
     def decorator(func):
@@ -176,6 +177,7 @@ def retry_dec(retry=5, on_error: Literal["raise", "continue"] = "raise"):
                             return
                     _logger.warning(f"{type(e).__name__}: {e}, retrying [{j + 1}]...")
                     _logger.debug(traceback.format_exc())
+                    sleep(wait)
 
         return wrapper
 
@@ -307,6 +309,7 @@ def iterate_wrapper(
     output: str | IO | None = None,
     restart=False,
     retry=5,
+    wait=1,
     on_error: Literal["raise", "continue"] = "raise",
     num_workers=1,
     bar=True,
@@ -400,7 +403,10 @@ def iterate_wrapper(
             raise ValueError(
                 f"func must accept 1, 2 or 3 arguments, got {func.__code__.co_argcount - len(args) - len(kwargs)}"
             )
-    retry_func = cast(Callable[[IO, DataType, dict[str, Any]], ReturnType], retry_dec(retry, on_error)(matched_func))
+    retry_func = cast(
+        Callable[[IO, DataType, dict[str, Any]], ReturnType],
+        retry_dec(retry, wait, on_error)(matched_func),
+    )
 
     def _get_job_args(i: int):
         return (
