@@ -115,9 +115,8 @@ class WorkerProcess(Process):
 
 def iterate_wrapper(
     func: Union[
-        # Callable[Concatenate[IO, DataType, dict[str, Any], ParamTypes], ReturnType],
-        Callable[Concatenate[IO, DataType, ParamTypes], ReturnType],
         Callable[Concatenate[DataType, ParamTypes], ReturnType],
+        Callable[Concatenate[IO, DataType, ParamTypes], ReturnType],
     ],
     data: Iterable[DataType],
     output: str | IO | None = None,
@@ -131,7 +130,6 @@ def iterate_wrapper(
     total_items: int | None = None,
     run_name=__name__,
     envs: list[dict[str, str]] = [],
-    # vars_factory: Callable[[], dict[str, Any]] = lambda: {},
     *args: ParamTypes.args,
     **kwargs: ParamTypes.kwargs,
 ) -> Sequence[ReturnType] | None:
