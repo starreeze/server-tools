@@ -56,8 +56,8 @@ def check_unfinished(run_name: str):
 def retry_dec(retry=5, wait=1, on_error: Literal["raise", "continue"] = "raise"):
     "decorator for retrying a function on exception; on_error could be raise or continue"
 
-    def decorator(func):
-        def wrapper(*args, **kwargs):
+    def decorator(func: Callable[ParamTypes, ReturnType]):
+        def wrapper(*args: ParamTypes.args, **kwargs: ParamTypes.kwargs) -> ReturnType | None:
             if retry <= 1:
                 return func(*args, **kwargs)
             for j in range(retry):
@@ -115,6 +115,17 @@ def merge_files(input_paths: list[str], output_stream: IO | None):
                 output_stream.write(f.read())
         if os.path.exists(path):
             os.remove(path)
+
+
+def clean_up(run_name: str, num_workers: int):
+    "Clean up the checkpoint and temporary result files"
+    checkpoint_path = ckpt_tmpl.format(name=run_name)
+    if os.path.exists(checkpoint_path):
+        os.remove(checkpoint_path)
+    for i in range(num_workers):
+        result_path = output_tmpl.format(name=run_name, id=i)
+        if os.path.exists(result_path):
+            os.remove(result_path)
 
 
 def bind_cache_json(file_path_factory: Callable[[], str]):

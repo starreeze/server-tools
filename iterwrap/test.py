@@ -1,4 +1,4 @@
-from . import IterateWrapper, iterate_wrapper
+from iterwrap import IterateWrapper, iterate_wrapper
 
 
 def _perform_operation(item: int):

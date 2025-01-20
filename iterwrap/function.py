@@ -1,6 +1,7 @@
+import json
 import os
 from functools import partial
-from multiprocessing import Lock, Process, Queue, synchronize
+from multiprocessing import Lock, Process, synchronize
 from typing import (
     IO,
     BinaryIO,
@@ -22,6 +23,7 @@ from .utils import (
     ParamTypes,
     ReturnType,
     ckpt_tmpl,
+    clean_up,
     load_ckpt,
     logger,
     merge_files,
@@ -103,14 +105,17 @@ class WorkerProcess(Process):
         super().__init__()
         self.args = args
         self.kwargs = kwargs
-        self.queue = Queue()  # Add queue for communication
 
     def run(self):
-        returns = _process_job(*self.args, **self.kwargs)
-        self.queue.put(returns)  # Put results in queue
+        _process_job(*self.args, **self.kwargs)
 
     def get_returns(self):
-        return self.queue.get()  # Get results from queue
+        # Read results from the output file created by _process_job
+        results = []
+        with open(output_tmpl.format(name=self.args[8], id=self.args[4])) as f:
+            for line in f:
+                results.append(json.loads(line))
+        return results
 
 
 def iterate_wrapper(
@@ -182,17 +187,16 @@ def iterate_wrapper(
         checkpoint = [0] * num_workers
         with open(checkpoint_path, "w") as f:
             f.write("\n".join(map(str, checkpoint)))
-        return_flag = True
     else:
         if len(checkpoint) != num_workers:
             raise ValueError(f"checkpoint length {len(checkpoint)} does not match num_workers {num_workers}!")
         max_split = (total_items + num_workers - 1) // num_workers
-        if not all(map(lambda x: 0 <= x < max_split, checkpoint)):
-            raise ValueError(f"checkpoint must be a list of non-negative integers less than max_split {max_split}")
-        return_flag = False
+        if not all(map(lambda x: 0 <= x <= max_split, checkpoint)):
+            raise ValueError(
+                f"checkpoint must be a list of non-negative integers less than or equal to max_split {max_split}"
+            )
 
-    # get multiprocessing results
-    lock = Lock()
+    # get output type
     if isinstance(output, str) or isinstance(output, TextIO):
         output_type = "text"
     elif isinstance(output, BinaryIO):
@@ -201,18 +205,31 @@ def iterate_wrapper(
         if output is not None:
             raise ValueError("output must be a string, a file-like object or None")
         output_type = "none"
+    original_output_type = output_type
+    if output_type == "none":
+        output_type = "text"  # Use text files for storing returns
 
+    # wrap user-defined function
     partial_func = partial(func, *args, **kwargs)
     match func.__code__.co_argcount - len(args) - len(kwargs):
         case 1:  # data_item only
-            matched_func = lambda io, data_item: partial_func(data_item)  # type: ignore
+            assert output_type == "text", "output_type must be text when data_item only is used"
+
+            def matched_func(io: IO, data_item: DataType):
+                result = partial_func(data_item)
+                io.write(json.dumps(result) + "\n")
+                return result
+
         case 2:  # io, data_item
-            matched_func = lambda io, data_item: partial_func(io, data_item)  # type: ignore
+            # in this case, the file writing will be handled in the user-defined func
+            matched_func = partial_func
         case _:
             raise ValueError(
                 f"func must accept 1 or 2 arguments, got {func.__code__.co_argcount - len(args) - len(kwargs)}"
             )
     retry_func = cast(Callable[[IO, DataType], ReturnType], retry_dec(retry, wait, on_error)(matched_func))
+
+    lock = Lock()
 
     def _get_job_args(i: int):
         return (
@@ -239,36 +256,25 @@ def iterate_wrapper(
             p.start()
         for p in pool:
             p.join()
-            returns.extend(p.get_returns())  # Get results from queue
+            returns.extend(p.get_returns())
             p.close()
     else:
         returns = _process_job(*_get_job_args(0))
 
-    # merge multiple files
-    if isinstance(output, str):
-        dir = os.path.dirname(output)
-        if dir and not os.path.exists(dir):
-            os.makedirs(dir, exist_ok=True)
-        f = open(output, "w" if restart else "a")
-    elif isinstance(output, IO):
-        f = output
-    else:
-        f = None
-    merge_files([output_tmpl.format(name=run_name, id=i) for i in range(num_workers)], f)
-    if f is not None:
-        f.close()
+    # Handle file merging based on original output type
+    if original_output_type != "none":
+        if isinstance(output, str):
+            dir = os.path.dirname(output)
+            if dir and not os.path.exists(dir):
+                os.makedirs(dir, exist_ok=True)
+            f = open(output, "w" if restart else "a")
+        elif isinstance(output, IO):
+            f = output
+        else:
+            raise ValueError("output must be a string or a file-like object")
+        merge_files([output_tmpl.format(name=run_name, id=i) for i in range(num_workers)], f)
+        if isinstance(output, str):
+            f.close()
 
-    # remove checkpoint file on complete
-    try:
-        os.remove(checkpoint_path)
-    except FileNotFoundError:
-        pass
-
-    if return_flag:
-        return returns
-    if returns[0] is not None:
-        logger.warning(
-            "The run is once interrupted and the return value is incomplete. "
-            "You can safely ignore this if you save your results in real-time."
-        )
-    return None
+    clean_up(run_name, num_workers)
+    return returns
