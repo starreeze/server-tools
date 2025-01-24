@@ -9,6 +9,7 @@ def _perform_operation(item: int):
         if _tmp:
             _tmp = False
             raise ValueError("here")
+    sleep(1)
     return item * item
 
 

@@ -4,14 +4,12 @@ from functools import partial
 from multiprocessing import Lock, Process, synchronize
 from typing import (
     IO,
-    BinaryIO,
     Callable,
     Concatenate,
     Iterable,
     Iterator,
     Literal,
     Sequence,
-    TextIO,
     Union,
     cast,
 )
@@ -22,12 +20,13 @@ from .utils import (
     DataType,
     ParamTypes,
     ReturnType,
-    ckpt_tmpl,
     clean_up,
+    default_tmp_dir,
+    get_checkpoint_path,
+    get_output_path,
     load_ckpt,
     logger,
     merge_files,
-    output_tmpl,
     retry_dec,
     write_ckpt,
 )
@@ -36,13 +35,14 @@ from .utils import (
 def _process_job(
     func: Callable[[IO, DataType], ReturnType],
     data: Iterator[DataType] | Sequence[DataType],
-    output_type: Literal["text", "binary", "none"],
+    output_type: Literal["text", "binary"],
     total_items: int,
     process_idx: int,
     num_workers: int,
     iterator_mode: bool,
     lock: synchronize.Lock,
     run_name,
+    tmp_dir: str,
     checkpoint,
     restart,
     bar,
@@ -50,8 +50,7 @@ def _process_job(
     envs: dict[str, str] | None,
 ) -> Sequence[ReturnType]:
     if envs is not None:
-        for k, v in envs.items():
-            os.environ[k] = v
+        os.environ.update(envs)
 
     chunk_items = (total_items + num_workers - 1) // num_workers
     start_pos = process_idx * chunk_items
@@ -75,7 +74,7 @@ def _process_job(
         for i in range_checkpointed:
             next(data)
     open_flags = ("w" if restart else "a") + ("b" if output_type == "binary" else "")
-    output = open(output_tmpl.format(name=run_name, id=process_idx), open_flags) if output_type != "none" else None
+    output = open(get_output_path(run_name, process_idx, tmp_dir), open_flags)
 
     logger.debug(f"{process_idx}: processing data from {checkpoint} to {end_pos}")
 
@@ -92,11 +91,10 @@ def _process_job(
             assert isinstance(data, Sequence)
             item = data[i]
         returns.append(func(output, item))  # type: ignore
-        if output is not None and flush:
+        if flush:
             output.flush()
-        write_ckpt(ckpt_tmpl.format(name=run_name), i + 1 - start_pos, process_idx, lock)
-    if output is not None:
-        output.close()
+            write_ckpt(get_checkpoint_path(run_name, tmp_dir), i + 1 - start_pos, process_idx, lock)
+    output.close()
     return returns
 
 
@@ -112,10 +110,67 @@ class WorkerProcess(Process):
     def get_returns(self):
         # Read results from the output file created by _process_job
         results = []
-        with open(output_tmpl.format(name=self.args[8], id=self.args[4])) as f:
+        with open(get_output_path(self.args[8], self.args[4], self.args[9])) as f:
             for line in f:
                 results.append(json.loads(line))
         return results
+
+
+def resume_progress(run_name: str, restart: bool, num_workers: int, total_items: int, tmp_dir: str):
+    checkpoint_path = get_checkpoint_path(run_name, tmp_dir)
+    checkpoint = load_ckpt(checkpoint_path, restart)
+    if checkpoint is None:
+        checkpoint = [0] * num_workers
+        with open(checkpoint_path, "w") as f:
+            f.write("\n".join(map(str, checkpoint)))
+    else:
+        if len(checkpoint) != num_workers:
+            raise ValueError(f"checkpoint length {len(checkpoint)} does not match num_workers {num_workers}!")
+        max_split = (total_items + num_workers - 1) // num_workers
+        if not all(map(lambda x: 0 <= x <= max_split, checkpoint)):
+            raise ValueError(
+                f"checkpoint must be a list of non-negative integers less than or equal to max_split {max_split}"
+            )
+        logger.warning(
+            f"Resuming from checkpoint. This is expected if you are resuming from a previous interruption, "
+            "but NOT expected if you are processing fresh data, "
+            "in which case please specify tmp_dir when calling iterate_wrapper."
+        )
+    return checkpoint
+
+
+def wrap_func(
+    func: Union[
+        Callable[Concatenate[DataType, ParamTypes], ReturnType],
+        Callable[Concatenate[IO, DataType, ParamTypes], ReturnType],
+    ],
+    output_type: Literal["text", "binary"],
+    *args: ParamTypes.args,
+    **kwargs: ParamTypes.kwargs,
+) -> Callable[[IO, DataType], ReturnType]:
+    """
+    Wrap the user-defined function by inserting additional arguments and handling the output stream.
+    """
+    partial_func = partial(func, *args, **kwargs)
+    match func.__code__.co_argcount - len(args) - len(kwargs):
+        case 1:  # data_item only
+
+            def matched_func(io: IO, data_item: DataType) -> ReturnType:
+                result = partial_func(data_item)
+                if output_type == "text":
+                    io.write(json.dumps(result) + "\n")
+                else:
+                    io.write(result)
+                return result
+
+        case 2:  # io, data_item
+            # in this case, the file writing will be handled in the user-defined func
+            matched_func = partial_func
+        case _:
+            raise ValueError(
+                f"func must accept 1 or 2 arguments, got {func.__code__.co_argcount - len(args) - len(kwargs)}"
+            )
+    return matched_func
 
 
 def iterate_wrapper(
@@ -125,6 +180,7 @@ def iterate_wrapper(
     ],
     data: Iterable[DataType],
     output: str | IO | None = None,
+    output_type: Literal["text", "binary"] = "text",
     restart=False,
     retry=5,
     wait=1,
@@ -134,6 +190,7 @@ def iterate_wrapper(
     flush=True,
     total_items: int | None = None,
     run_name=__name__,
+    tmp_dir=default_tmp_dir(),
     envs: list[dict[str, str]] = [],
     *args: ParamTypes.args,
     **kwargs: ParamTypes.kwargs,
@@ -141,9 +198,10 @@ def iterate_wrapper(
     """Wrapper on a processor (func) and iterable (data) to support multiprocessing, retrying and automatic resuming.
 
     Args:
-        func: The processor function. It should accept the following argument patterns: data item only; output stream, data item. Additional args (*args and **kwargs) can be added in func, which should be passed to the wrapper. Within func, the output stream can be used to save data in real time.
+        func: The processor function. It should accept the following argument patterns: data item only; output stream, data item. Additional args (*args and **kwargs) can be added in func, which should be passed to the wrapper. Within func, the output stream can be used to save data in real time. If the output stream is not provided, the output will written to a the tmp_dir for progress recovery.
         data: The data to be processed. It can be an iterable or a sequence. In each iteration, the data item in data will be passed to func.
-        output: The output stream. It can be a file path, a file object or None. If None, no output will be written.
+        output: The output stream. It can be a file path, a file-like object or None. If None, no output will be saved after successful processing.
+        output_type: The type of the output stream. Besides the type of the final output, it also affects the temporary file used for progress recovery if output stream is not handled in func. If "text", the output will be json-serialized and written to a temporary text file. If "binary", the output will be written to the file without any serialization. It is recommended to implement your own output stream handler in func if you want to save the output in binary format.
         restart: Whether to restart from the beginning.
         retry: The number of retries for processing each data item.
         on_error: The action to take when an exception is raised in func.
@@ -152,6 +210,7 @@ def iterate_wrapper(
         flush: Whether to flush the output stream after each data item is processed.
         total_items: The total number of items in data. It is required when data is not a sequence.
         run_name: The name of the run. It is used to construct the checkpoint file path.
+        tmp_dir: The dir to save tmp files, including outputs and checkpoints. If None, the tmp files will be saved in the platform tempdir / iterwrap, e.g., /tmp/iterwrap on linux.
         envs: Additional environment variables for each worker. This will be set before spawning new processes.
         *args: Additional positional arguments to be passed to func.
         **kwargs: Additional keyword arguments to be passed to func.
@@ -180,54 +239,11 @@ def iterate_wrapper(
         )
         num_workers = total_items
 
-    # load checkpoint
-    checkpoint_path = ckpt_tmpl.format(name=run_name)
-    checkpoint = load_ckpt(checkpoint_path, restart)
-    if checkpoint is None:
-        checkpoint = [0] * num_workers
-        with open(checkpoint_path, "w") as f:
-            f.write("\n".join(map(str, checkpoint)))
-    else:
-        if len(checkpoint) != num_workers:
-            raise ValueError(f"checkpoint length {len(checkpoint)} does not match num_workers {num_workers}!")
-        max_split = (total_items + num_workers - 1) // num_workers
-        if not all(map(lambda x: 0 <= x <= max_split, checkpoint)):
-            raise ValueError(
-                f"checkpoint must be a list of non-negative integers less than or equal to max_split {max_split}"
-            )
+    os.makedirs(tmp_dir, exist_ok=True)
+    checkpoints = resume_progress(run_name, restart, num_workers, total_items, tmp_dir)
 
-    # get output type
-    if isinstance(output, str) or isinstance(output, TextIO):
-        output_type = "text"
-    elif isinstance(output, BinaryIO):
-        output_type = "binary"
-    else:
-        if output is not None:
-            raise ValueError("output must be a string, a file-like object or None")
-        output_type = "none"
-    original_output_type = output_type
-    if output_type == "none":
-        output_type = "text"  # Use text files for storing returns
-
-    # wrap user-defined function
-    partial_func = partial(func, *args, **kwargs)
-    match func.__code__.co_argcount - len(args) - len(kwargs):
-        case 1:  # data_item only
-            assert output_type == "text", "output_type must be text when data_item only is used"
-
-            def matched_func(io: IO, data_item: DataType):
-                result = partial_func(data_item)
-                io.write(json.dumps(result) + "\n")
-                return result
-
-        case 2:  # io, data_item
-            # in this case, the file writing will be handled in the user-defined func
-            matched_func = partial_func
-        case _:
-            raise ValueError(
-                f"func must accept 1 or 2 arguments, got {func.__code__.co_argcount - len(args) - len(kwargs)}"
-            )
-    retry_func = cast(Callable[[IO, DataType], ReturnType], retry_dec(retry, wait, on_error)(matched_func))
+    wrapped_func = wrap_func(func, output_type, *args, **kwargs)
+    retry_func = cast(Callable[[IO, DataType], ReturnType], retry_dec(retry, wait, on_error)(wrapped_func))
 
     lock = Lock()
 
@@ -242,7 +258,8 @@ def iterate_wrapper(
             iterator_mode,
             lock,
             run_name,
-            checkpoint[i],
+            tmp_dir,
+            checkpoints[i],
             restart,
             bar,
             flush,
@@ -261,20 +278,18 @@ def iterate_wrapper(
     else:
         returns = _process_job(*_get_job_args(0))
 
-    # Handle file merging based on original output type
-    if original_output_type != "none":
+    # Merge output files if output is specified
+    if output is not None:
         if isinstance(output, str):
             dir = os.path.dirname(output)
             if dir and not os.path.exists(dir):
                 os.makedirs(dir, exist_ok=True)
             f = open(output, "w" if restart else "a")
-        elif isinstance(output, IO):
-            f = output
         else:
-            raise ValueError("output must be a string or a file-like object")
-        merge_files([output_tmpl.format(name=run_name, id=i) for i in range(num_workers)], f)
+            f = output
+        merge_files([get_output_path(run_name, i, tmp_dir) for i in range(num_workers)], f, output_type)
         if isinstance(output, str):
             f.close()
 
-    clean_up(run_name, num_workers)
+    clean_up(run_name, num_workers, tmp_dir)
     return returns

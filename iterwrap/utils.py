@@ -1,6 +1,7 @@
 import json
 import logging
 import os
+import tempfile
 import traceback
 from functools import wraps
 from glob import glob
@@ -10,9 +11,19 @@ from typing import IO, Callable, Literal, ParamSpec, TypeVar
 
 from tqdm import tqdm
 
+
 # default file path
-output_tmpl = "{name}_p{id}.output"
-ckpt_tmpl = "{name}.ckpt"
+def default_tmp_dir() -> str:
+    return os.path.join(tempfile.gettempdir(), "iterwrap")
+
+
+def get_output_path(name: str, id: int | Literal["*"], tmp_dir: str) -> str:
+    return os.path.join(tmp_dir, f"{name}_p{id}.output")
+
+
+def get_checkpoint_path(name: str, tmp_dir: str) -> str:
+    return os.path.join(tmp_dir, f"{name}.ckpt")
+
 
 # type
 DataType = TypeVar("DataType")  # the data type of the items to be processed
@@ -41,11 +52,11 @@ def setup_tqdm_logger(name=__name__, fmt="%(asctime)s - %(levelname)s - %(messag
 logger = setup_tqdm_logger()
 
 
-def check_unfinished(run_name: str):
+def check_unfinished(run_name: str, tmp_dir: str):
     "To check if the run is unfinished, according to whether the checkpoint file and the cache file exists"
-    ckpt = ckpt_tmpl.format(name=run_name)
+    ckpt = get_checkpoint_path(run_name, tmp_dir)
     if os.path.exists(ckpt):
-        num_cache = len(glob(output_tmpl.format(name=run_name, id="*")))
+        num_cache = len(glob(get_output_path(run_name, "*", tmp_dir)))
         num_ckpt = len(open(ckpt, "r").readlines())
         if num_cache == num_ckpt:
             return True
@@ -108,22 +119,23 @@ def write_ckpt(path: str, checkpoint: int, process_idx: int, lock: synchronize.L
             f.write("\n".join(checkpoints))
 
 
-def merge_files(input_paths: list[str], output_stream: IO | None):
+def merge_files(input_paths: list[str], output_stream: IO | None, output_type: Literal["text", "binary"]):
+    open_flag = "r" if output_type == "text" else "rb"
     for path in input_paths:
         if output_stream is not None:
-            with open(path, "r") as f:
+            with open(path, open_flag) as f:
                 output_stream.write(f.read())
         if os.path.exists(path):
             os.remove(path)
 
 
-def clean_up(run_name: str, num_workers: int):
+def clean_up(run_name: str, num_workers: int, tmp_dir: str):
     "Clean up the checkpoint and temporary result files"
-    checkpoint_path = ckpt_tmpl.format(name=run_name)
+    checkpoint_path = get_checkpoint_path(run_name, tmp_dir)
     if os.path.exists(checkpoint_path):
         os.remove(checkpoint_path)
     for i in range(num_workers):
-        result_path = output_tmpl.format(name=run_name, id=i)
+        result_path = get_output_path(run_name, i, tmp_dir)
         if os.path.exists(result_path):
             os.remove(result_path)
 

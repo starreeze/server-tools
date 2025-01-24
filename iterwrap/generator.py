@@ -4,7 +4,7 @@ from typing import Generic, Iterable, Literal, Sequence
 
 from tqdm import tqdm
 
-from .utils import DataType, ckpt_tmpl
+from .utils import DataType, default_tmp_dir, get_checkpoint_path
 
 
 class IterateWrapper(Generic[DataType]):
@@ -17,6 +17,7 @@ class IterateWrapper(Generic[DataType]):
         total_items: int | None = None,
         convert_type=list,
         run_name=__name__,
+        tmp_dir=default_tmp_dir(),
     ):
         """wrap some iterables to provide automatic resuming on interruption, no retrying and limited to sequence
 
@@ -28,6 +29,7 @@ class IterateWrapper(Generic[DataType]):
             total_items: total items to be iterated
             convert_type: convert the data to this type
             run_name: name of the run to identify the checkpoint and output files
+            tmp_dir: temporary directory for checkpoint files
         """
         if mode == "product":
             self.data: Sequence[DataType] = convert_type(product(*data))
@@ -36,7 +38,8 @@ class IterateWrapper(Generic[DataType]):
         else:
             raise ValueError("mode must be 'product' or 'zip'")
         total_items = total_items if total_items is not None else len(self.data)
-        checkpoint_path = ckpt_tmpl.format(name=run_name)
+        os.makedirs(tmp_dir, exist_ok=True)
+        checkpoint_path = get_checkpoint_path(run_name, tmp_dir)
         if restart:
             os.remove(checkpoint_path)
         try:
