@@ -49,10 +49,7 @@ class IterateWrapper(Generic[DataType]):
             checkpoint = 0
         if bar >= 0:
             self.wrapped_range = tqdm(
-                range(checkpoint, total_items),
-                initial=checkpoint,
-                total=total_items,
-                position=bar,
+                range(checkpoint, total_items), initial=checkpoint, total=total_items, position=bar
             )
         else:
             self.wrapped_range = range(checkpoint, total_items)

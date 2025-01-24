@@ -68,7 +68,9 @@ class GPUManager:
 
     def update_gpu_status(self, interval: int) -> None:
         if not self.gpu_pending:
-            _logger.debug(f"gpu available: {self.gpu_avail}, pending: {self.gpu_pending}, inuse: {self.gpu_inuse}")
+            _logger.debug(
+                f"gpu available: {self.gpu_avail}, pending: {self.gpu_pending}, inuse: {self.gpu_inuse}"
+            )
             return
         try:
             gpustat_output = subprocess.check_output(["gpustat", "--json"], text=True)
@@ -95,7 +97,9 @@ class GPUManager:
                 if gpu_id in self.gpu_avail:
                     self.gpu_avail.remove(gpu_id)
                     self.gpu_pending.add(gpu_id)
-        _logger.debug(f"gpu available: {self.gpu_avail}, pending: {self.gpu_pending}, inuse: {self.gpu_inuse}")
+        _logger.debug(
+            f"gpu available: {self.gpu_avail}, pending: {self.gpu_pending}, inuse: {self.gpu_inuse}"
+        )
 
     def allocate(self, job_id: int, ngpu: int) -> list[int] | None:
         "Allocate gpus according to number of gpus needed. Return None if no available."
@@ -264,7 +268,9 @@ class ArgParser:
     def parse_start(self):
         parser = ArgumentParser()
         parser.add_argument("--gpus", "-g", type=int, nargs="+", default=[0, 1, 2, 3, 4, 5, 6, 7])
-        parser.add_argument("--jobs", "-j", type=int, nargs="+", default=[], help="select which jobs to include")
+        parser.add_argument(
+            "--jobs", "-j", type=int, nargs="+", default=[], help="select which jobs to include"
+        )
         parser.add_argument("--interval", "-i", type=int, default=0, help="wait time before using a gpu")
         parser.add_argument("--frequency", "-f", type=int, default=30, help="frequency to check for gpu")
         parser.add_argument(

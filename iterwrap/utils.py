@@ -60,7 +60,9 @@ def check_unfinished(run_name: str, tmp_dir: str):
         num_ckpt = len(open(ckpt, "r").readlines())
         if num_cache == num_ckpt:
             return True
-        logger.warning(f"unmatched: {num_cache} unfinished files vs {num_ckpt} checkpoints, restart from the beginning")
+        logger.warning(
+            f"unmatched: {num_cache} unfinished files vs {num_ckpt} checkpoints, restart from the beginning"
+        )
     return False
 
 

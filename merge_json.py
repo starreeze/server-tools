@@ -40,7 +40,9 @@ def merge_json_files(input_files: list[str], output_file: str) -> None:
                 data = json.load(f)
 
                 # Check and set top-level type
-                current_type = "list" if isinstance(data, list) else "dict" if isinstance(data, dict) else None
+                current_type = (
+                    "list" if isinstance(data, list) else "dict" if isinstance(data, dict) else None
+                )
                 if current_type is None:
                     print(f"Error: File {input_file} must contain either a list or dict at top level")
                     sys.exit(1)
@@ -74,7 +76,9 @@ def merge_json_files(input_files: list[str], output_file: str) -> None:
 
 
 def main():
-    parser = ArgumentParser(description="Merge multiple JSON files with the same top-level type (list or dict)")
+    parser = ArgumentParser(
+        description="Merge multiple JSON files with the same top-level type (list or dict)"
+    )
     parser.add_argument("input", nargs="+", help="Input JSON files (glob patterns supported)")
     parser.add_argument("--output", "-o", required=True, help="Output JSON file path")
 

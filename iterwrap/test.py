@@ -16,11 +16,7 @@ def _perform_operation(item: int):
 def _test_fn():
     data = list(range(10))
     num_workers = 3
-    returns = iterate_wrapper(
-        _perform_operation,
-        data,
-        num_workers=num_workers,
-    )
+    returns = iterate_wrapper(_perform_operation, data, num_workers=num_workers)
     print(returns)
 
 

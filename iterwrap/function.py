@@ -2,17 +2,7 @@ import json
 import os
 from functools import partial
 from multiprocessing import Lock, Process, synchronize
-from typing import (
-    IO,
-    Callable,
-    Concatenate,
-    Iterable,
-    Iterator,
-    Literal,
-    Sequence,
-    Union,
-    cast,
-)
+from typing import IO, Callable, Concatenate, Iterable, Iterator, Literal, Sequence, Union, cast
 
 from tqdm import tqdm
 
@@ -220,7 +210,9 @@ def iterate_wrapper(
     """
     # init vars
     if num_workers < 1 or len(envs) and len(envs) != num_workers:
-        raise ValueError("num_workers must be a positive integer and envs must be a list of length num_workers")
+        raise ValueError(
+            "num_workers must be a positive integer and envs must be a list of length num_workers"
+        )
     if isinstance(data, Sequence):
         iterator_mode = False
         if total_items is not None:

@@ -31,12 +31,7 @@ def parse_args():
     parser.add_argument("--version", "-v", action="version", version="xpkg version " + __version__)
     parser.add_argument("--install", "-i", nargs="+", default=[], type=str)
     parser.add_argument("--remove", "-r", nargs="+", default=[], type=str)
-    parser.add_argument(
-        "--force",
-        "-f",
-        action="store_true",
-        help="force install ignoring dependency errors",
-    )
+    parser.add_argument("--force", "-f", action="store_true", help="force install ignoring dependency errors")
     parser.add_argument("--clear", action="store_true")
     parser.add_argument("--update", action="store_true")
     parser.add_argument("--list", "-l", action="store_true")
