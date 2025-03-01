@@ -14,6 +14,7 @@ from .utils import (
     default_tmp_dir,
     get_checkpoint_path,
     get_output_path,
+    get_partial_argcount,
     load_ckpt,
     logger,
     merge_files,
@@ -97,13 +98,26 @@ class WorkerProcess(Process):
     def run(self):
         _process_job(*self.args, **self.kwargs)
 
-    def get_returns(self):
+    def get_returns(
+        self,
+        output_type: Literal["text", "binary"],
+        binary_sep: bytes,
+        binary_load_fn: Callable[[bytes], list[ReturnType]] | None,
+    ) -> list[ReturnType]:
         # Read results from the output file created by _process_job
-        results = []
-        with open(get_output_path(self.args[8], self.args[4], self.args[9])) as f:
-            for line in f:
-                results.append(json.loads(line))
-        return results
+        results_path = get_output_path(self.args[8], self.args[4], self.args[9])
+        if output_type == "text":
+            results = []
+            with open(results_path) as f:
+                for line in f:
+                    results.append(json.loads(line))
+            return results
+        with open(results_path, "rb") as f:
+            content = f.read()
+        if binary_load_fn is None:
+            return content.split(binary_sep)  # type: ignore
+        else:
+            return binary_load_fn(content)
 
 
 def resume_progress(run_name: str, restart: bool, num_workers: int, total_items: int, tmp_dir: str):
@@ -126,6 +140,9 @@ def resume_progress(run_name: str, restart: bool, num_workers: int, total_items:
             "but NOT expected if you are processing fresh data, "
             "in which case please specify tmp_dir when calling iterate_wrapper."
         )
+        logger.info(
+            f"You can choose to delete the checkpoint file `{checkpoint_path}` to restart from the beginning."
+        )
     return checkpoint
 
 
@@ -135,6 +152,7 @@ def wrap_func(
         Callable[Concatenate[IO, DataType, ParamTypes], ReturnType],
     ],
     output_type: Literal["text", "binary"],
+    binary_sep: bytes,
     *args: ParamTypes.args,
     **kwargs: ParamTypes.kwargs,
 ) -> Callable[[IO, DataType], ReturnType]:
@@ -142,24 +160,35 @@ def wrap_func(
     Wrap the user-defined function by inserting additional arguments and handling the output stream.
     """
     partial_func = partial(func, *args, **kwargs)
-    match func.__code__.co_argcount - len(args) - len(kwargs):
+    arg_count = get_partial_argcount(partial_func)
+    match arg_count:
         case 1:  # data_item only
+            if output_type == "text":
 
-            def matched_func(io: IO, data_item: DataType) -> ReturnType:
-                result = partial_func(data_item)
-                if output_type == "text":
+                def matched_func(io: IO, data_item: DataType) -> ReturnType:
+                    result = partial_func(data_item)
                     io.write(json.dumps(result) + "\n")
-                else:
-                    io.write(result)
-                return result
+                    return result
+
+            else:
+                logger.warning(
+                    f"You may need to implement your own output stream handler in processor func if you want to save the output in binary format. "
+                    f"Using binary separator: {binary_sep}. Please make sure this is valid for your use case."
+                )
+
+                def matched_func(io: IO, data_item: DataType) -> ReturnType:
+                    result = partial_func(data_item)
+                    assert isinstance(
+                        result, bytes
+                    ), "The return value of processor func must be bytes if output_type is binary."
+                    io.write(result + binary_sep)
+                    return result
 
         case 2:  # io, data_item
             # in this case, the file writing will be handled in the user-defined func
             matched_func = partial_func
         case _:
-            raise ValueError(
-                f"func must accept 1 or 2 arguments, got {func.__code__.co_argcount - len(args) - len(kwargs)}"
-            )
+            raise ValueError(f"func must accept 1 or 2 arguments, got {arg_count}")
     return matched_func
 
 
@@ -181,6 +210,8 @@ def iterate_wrapper(
     total_items: int | None = None,
     run_name=__name__,
     tmp_dir=default_tmp_dir(),
+    binary_sep=b"#iterwrap_sep#",
+    binary_load_fn: Callable[[bytes], list[ReturnType]] | None = None,
     envs: list[dict[str, str]] = [],
     *args: ParamTypes.args,
     **kwargs: ParamTypes.kwargs,
@@ -188,10 +219,10 @@ def iterate_wrapper(
     """Wrapper on a processor (func) and iterable (data) to support multiprocessing, retrying and automatic resuming.
 
     Args:
-        func: The processor function. It should accept the following argument patterns: data item only; output stream, data item. Additional args (*args and **kwargs) can be added in func, which should be passed to the wrapper. Within func, the output stream can be used to save data in real time. If the output stream is not provided, the output will written to a the tmp_dir for progress recovery.
+        func: The processor function. It should accept the following argument patterns: data item only; output stream, data item. Additional args (*args and **kwargs) can be added in func, which should be passed to the wrapper. Within func, the output stream can be used to save data in real time. In text mode: The data should be written to the output stream one sample per line. If the output stream is not provided, the output will be written to a the tmp_dir for progress recovery using jsonl serialization. In binary mode: You can specify a binary separator (default: b"#iterwrap_sep#") or a binary load function (default: None). The return value of func must be bytes and should be written to the output stream in a way compatible with the binary separator or the binary load function. If the output stream is not provided, the output will be written using binary separator.
         data: The data to be processed. It can be an iterable or a sequence. In each iteration, the data item in data will be passed to func.
         output: The output stream. It can be a file path, a file-like object or None. If None, no output will be saved after successful processing.
-        output_type: The type of the output stream. Besides the type of the final output, it also affects the temporary file used for progress recovery if output stream is not handled in func. If "text", the output will be json-serialized and written to a temporary text file. If "binary", the output will be written to the file without any serialization. It is recommended to implement your own output stream handler in func if you want to save the output in binary format.
+        output_type: The type of the output stream. Besides the type of the final output, it also affects the temporary file used for progress recovery if output stream is not handled in func. Can be "text" or "binary".
         restart: Whether to restart from the beginning.
         retry: The number of retries for processing each data item.
         on_error: The action to take when an exception is raised in func.
@@ -234,7 +265,7 @@ def iterate_wrapper(
     os.makedirs(tmp_dir, exist_ok=True)
     checkpoints = resume_progress(run_name, restart, num_workers, total_items, tmp_dir)
 
-    wrapped_func = wrap_func(func, output_type, *args, **kwargs)
+    wrapped_func = wrap_func(func, output_type, binary_sep, *args, **kwargs)
     retry_func = cast(Callable[[IO, DataType], ReturnType], retry_dec(retry, wait, on_error)(wrapped_func))
 
     lock = Lock()
@@ -265,7 +296,7 @@ def iterate_wrapper(
             p.start()
         for p in pool:
             p.join()
-            returns.extend(p.get_returns())
+            returns.extend(p.get_returns(output_type, binary_sep, binary_load_fn))
             p.close()
     else:
         returns = _process_job(*_get_job_args(0))

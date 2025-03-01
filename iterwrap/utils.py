@@ -5,6 +5,7 @@ import tempfile
 import traceback
 from functools import wraps
 from glob import glob
+from inspect import signature
 from multiprocessing import synchronize
 from time import sleep
 from typing import IO, Callable, Literal, ParamSpec, TypeVar
@@ -52,8 +53,10 @@ def setup_tqdm_logger(name=__name__, fmt="%(asctime)s - %(levelname)s - %(messag
 logger = setup_tqdm_logger()
 
 
-def check_unfinished(run_name: str, tmp_dir: str):
+def check_unfinished(run_name: str, tmp_dir: str | None = None):
     "To check if the run is unfinished, according to whether the checkpoint file and the cache file exists"
+    if tmp_dir is None:
+        tmp_dir = default_tmp_dir()
     ckpt = get_checkpoint_path(run_name, tmp_dir)
     if os.path.exists(ckpt):
         num_cache = len(glob(get_output_path(run_name, "*", tmp_dir)))
@@ -161,3 +164,68 @@ def bind_cache_json(file_path_factory: Callable[[], str]):
         return wrapper
 
     return decorator
+
+
+def get_partial_argcount(f: Callable) -> int:
+    """
+    Get the number of arguments that haven't been provided yet for a variable with __call__ method.
+    Args:
+        f: the object to be checked. Can be a partial function, a vanilla function,or any other object with __call__ method.
+    Returns:
+        the number of arguments that haven't been provided yet
+    """
+    if not hasattr(f, "func"):
+        # If it's not a partial function, return the number of parameters
+        # For classes with __call__, we need to check the __call__ method
+        if (
+            hasattr(f, "__call__")
+            and not isinstance(f, type)
+            and type(f).__call__ is not object.__call__
+            and not callable(getattr(f, "__call__", None))
+        ):
+            sig = signature(f.__call__)
+            # Check if __call__ is a regular method (has self), classmethod (has cls), or staticmethod (has neither)
+            if isinstance(type(f).__call__, (classmethod, staticmethod)):
+                self_param = 0  # No need to subtract for classmethods or staticmethods
+            else:
+                self_param = 1  # Subtract 1 for 'self'
+            return len(sig.parameters) - self_param
+        return len(signature(f).parameters)
+
+    # For partial functions, we need to check how many arguments are still required
+    # Get the original function (may be nested partials)
+    orig_func = f
+    while hasattr(orig_func, "func"):
+        orig_func = orig_func.func
+
+    # Get the signature of the original function
+    # For classes with __call__, we need to check the __call__ method
+    if (
+        hasattr(orig_func, "__call__")
+        and not isinstance(orig_func, type)
+        and type(orig_func).__call__ is not object.__call__
+        and not callable(getattr(orig_func, "__call__", None))
+    ):
+        sig = signature(orig_func.__call__)
+        # Check if __call__ is a regular method (has self), classmethod (has cls), or staticmethod (has neither)
+        if isinstance(type(orig_func).__call__, (classmethod, staticmethod)):
+            self_param = 0  # No need to subtract for classmethods or staticmethods
+        else:
+            self_param = 1  # Subtract 1 for 'self'
+    else:
+        sig = signature(orig_func)
+        self_param = 0
+
+    # Count how many arguments have been provided through partial application
+    provided_args = set()
+    current = f
+    while hasattr(current, "func"):
+        # Add positional args
+        # Note: due to the flattening of partial implementation in CPython, update on range is ok
+        provided_args.update(range(len(current.args)))
+        # Add keyword args
+        provided_args.update(current.keywords.keys())
+        current = current.func
+
+    # Return the number of parameters that haven't been provided yet
+    return len(sig.parameters) - len(provided_args) - self_param
