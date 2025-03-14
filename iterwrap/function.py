@@ -244,6 +244,10 @@ def iterate_wrapper(
         raise ValueError(
             "num_workers must be a positive integer and envs must be a list of length num_workers"
         )
+    if num_workers > 1 and os.name == "nt":
+        logger.warning(
+            "Iterate wrapper with multiprocessing is unavailable on Windows, as it requires 'folk' syscall."
+        )
     if isinstance(data, Sequence):
         iterator_mode = False
         if total_items is not None:
