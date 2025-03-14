@@ -6,10 +6,10 @@ import traceback
 from functools import wraps
 from glob import glob
 from inspect import signature
-from multiprocessing import synchronize
 from time import sleep
 from typing import IO, Callable, Literal, ParamSpec, TypeVar
 
+from multiprocess import synchronize
 from tqdm import tqdm
 
 

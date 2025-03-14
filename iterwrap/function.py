@@ -1,9 +1,9 @@
 import json
 import os
 from functools import partial
-from multiprocessing import Lock, Process, synchronize
 from typing import IO, Callable, Concatenate, Iterable, Iterator, Literal, Sequence, Union, cast
 
+from multiprocess import Lock, Process, synchronize  # type: ignore
 from tqdm import tqdm
 
 from .utils import (
@@ -140,8 +140,9 @@ def resume_progress(run_name: str, restart: bool, num_workers: int, total_items:
             "but NOT expected if you are processing fresh data, "
             "in which case please specify tmp_dir when calling iterate_wrapper."
         )
-        logger.info(
-            f"You can choose to delete the checkpoint file `{checkpoint_path}` to restart from the beginning."
+        logger.warning(
+            f"You can also choose to delete the checkpoint file `{checkpoint_path}` "
+            "or specify restart=True when calling iterate_wrapper to restart from the beginning."
         )
     return checkpoint
 
@@ -245,9 +246,7 @@ def iterate_wrapper(
             "num_workers must be a positive integer and envs must be a list of length num_workers"
         )
     if num_workers > 1 and os.name == "nt":
-        logger.warning(
-            "Iterate wrapper with multiprocessing is unavailable on Windows, as it requires 'folk' syscall."
-        )
+        logger.warning("Iterate wrapper with multiprocessing is untested on Windows; use with caution.")
     if isinstance(data, Sequence):
         iterator_mode = False
         if total_items is not None:

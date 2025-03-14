@@ -9,7 +9,7 @@ from .generator import IterateWrapper
 from .utils import bind_cache_json, check_unfinished, retry_dec
 
 # package info
-__version__ = "0.3.3"
+__version__ = "0.4.0"
 __author__ = "Starreeze"
 __license__ = "GPLv3"
 __url__ = "https://github.com/starreeze/server-tools"
