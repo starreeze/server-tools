@@ -8,17 +8,21 @@ always beginning from the job with highest orders. Among the same order,
 those jobs with higher gpu demands will be prioritized. If there is no free GPU available,
 it wait until there are enough free GPUs to execute the job.
 It will automatically set the environment variable `CUDA_AVAILABLE_DEVICES` to the free GPU IDs when run the job.
-If `-s` is set, the program will automatically split the job into multiple jobs with 1 gpu for each.
-Make sure that your program accepts `start_pos` and `end_pos`, and your output filename is dependent on them.
 The output of the jobs will be both logged to the console and a file.
 
 It support the following operations:
-1. add: `python jobq.py add [job_cmd] [-n n_gpus_required] [-o job_order] [-s total_samples]`.
+1. add: `python jobq.py add [job_cmd] [-g gpus_required_for_each_job] [-s samples_to_be_processed_for_each_job]
+    [--_start initial_start_pos] [-o job_order]`.
     Add a job to the queue with command to be executed with os.system(job_cmd).
+    If `-g` and `-s` is set, the program will automatically split the job into multiple jobs.
+    In `-g` `-s`, `x^y` means x repeats for y times for short, e.g., `1^4` means `1 1 1 1`.
+    Make sure that your program accepts `start_pos` and `end_pos`, and your output filename is dependent on them.
+    Example: `python jobq.py add python process.py -g 1^4 2^2 -s 100^5 101 --_start 100`.
+    You can safely run it and list the jobs to see its effect.
 2. list: `python jobq.py ls`. List all jobs in the queue, including an ID
     (which is a unique integer, starting from 0 and adds 1 for each job),
     the datetime upon creation, job command, and the gpu requirement.
-3. delete: `python jobq.py del [job_id]`. Delete a job from the queue by its ID.
+3. delete: `python jobq.py del [job_id / all]`. Delete a job from the queue by its ID or delete all jobs.
 4. start: `python jobq.py start [-g gpus_to_be_used] [-i wait_time_before_using_a_free_gpu] [-j jobs included]
     [-f pool_frequency_for_checking_gpu_availability]`.
     Start a daemon to run the jobs in the queue. The daemon should run indefinitely until stopped manually.
@@ -37,7 +41,6 @@ import subprocess
 import sys
 import time
 from argparse import ArgumentParser
-from copy import deepcopy
 from multiprocessing import Process
 from typing import Any, Iterable
 
@@ -45,7 +48,7 @@ from natsort import natsorted
 from rich.logging import RichHandler
 
 # package info
-__version__ = "0.1.6"
+__version__ = "0.1.7"
 __author__ = "Starreeze"
 __license__ = "GPLv3"
 __url__ = "https://github.com/starreeze/server-tools"
@@ -134,37 +137,41 @@ class JobQueue:
             json.dump(job_queue, file)
 
     @staticmethod
-    def add_single(args, job_queue: list[dict[str, Any]]):
-        job_id = max([job["id"] for job in job_queue], default=-1) + 1 if args.id == -1 else args.id
-        current_dir = os.getcwd()
+    def add_single(cmd: list[str], id: int, order: int, ngpu: int, job_queue: list[dict[str, Any]]):
+        job_id = max([job["id"] for job in job_queue], default=-1) + 1 if id == -1 else id
         job = {
             "id": job_id,
             "datetime": datetime.datetime.now().strftime("%Y/%m/%d %H:%M:%S"),
-            "command": args.cmd,
-            "ngpu": args.ngpu,
-            "order": args.order,
-            "dir": current_dir,
+            "command": cmd,
+            "ngpu": ngpu,
+            "order": order,
+            "dir": os.getcwd(),
         }
         job_queue.append(job)
         _logger.info(f"Added job {job_id}.")
 
     def add(self, args):
         job_queue = self.load()
-        if args.separate_total:
-            chunk_size = (args.separate_total - 1 + args.ngpu) // args.ngpu
-            for i in range(args.ngpu):
-                separate_args = deepcopy(args)
-                add_args = [
-                    "--start_pos",
-                    str(i * chunk_size),
-                    "--end_pos",
-                    str(min((i + 1) * chunk_size, args.separate_total)),
-                ]
-                separate_args.cmd.extend(add_args)
-                separate_args.ngpu = 1
-                self.add_single(separate_args, job_queue)
+        if len(args.gpus) > 1:
+            if len(args.gpus) != len(args.samples):
+                raise ValueError("Mismatched length of gpus and samples!")
+            if args.id != -1:
+                raise ValueError("Id must be set to -1 to allow auto alloc for multiple jobs!")
+            start = args._start
+            for ngpu, nsample in zip(args.gpus, args.samples):
+                cmd = args.cmd + ["--start_pos", start, "--end_pos", start + nsample]
+                self.add_single(cmd, args.id, args.order, ngpu, job_queue)
+                start += nsample
         else:
-            self.add_single(args, job_queue)
+            if args._start:
+                args.cmd.extend(["--start_pos", str(args._start)])
+            if len(args.samples) == 0:
+                pass
+            elif len(args.samples) == 1:
+                args.cmd.extend(["--end_pos", str(args._start + args.samples[0])])
+            else:
+                raise ValueError("Mismatched length of gpus and samples!")
+            self.add_single(args.cmd, args.id, args.order, args.gpus[0], job_queue)
         self.save(job_queue)
 
     def list(self):
@@ -280,19 +287,30 @@ class ArgParser:
 
     def parse_add(self):
         parser = ArgumentParser()
-        parser.add_argument("cmd", nargs="+", help="the full command for this job")
-        parser.add_argument("--ngpu", "-n", type=int, default=1, help="number of gpus needed for this job")
+        parser.add_argument("cmd", nargs="+", help="the full command for the job(s)")
         parser.add_argument(
-            "--separate_total",
-            "-s",
-            type=int,
-            default=0,
-            help="total size of samples. If >0, run the job in separate processes, each allocating a gpu",
+            "--gpus",
+            "-g",
+            nargs="+",
+            type=str,
+            default=["1"],
+            help="a list of numbers of gpus needed for each job. `^` is supported for multiple same input",
         )
+        parser.add_argument(
+            "--samples",
+            "-s",
+            nargs="+",
+            type=str,
+            default=[],
+            help="a list of numbers of samples to be processed by each job. `^` is supported for multiple same input",
+        )
+        parser.add_argument("--_start", type=int, default=0, help="the start position for handling the data")
         parser.add_argument("--order", "-o", type=int, default=0, help="the order of this job")
         parser.add_argument("--id", "-i", type=int, default=-1, help="the id of this job")
         known_args, unknown_args = parser.parse_known_args(self.args)
         known_args.cmd.extend(unknown_args)
+        known_args.gpus = self.parse_optional_multi_grammar(known_args.gpus)
+        known_args.samples = self.parse_optional_multi_grammar(known_args.samples)
         return known_args
 
     def parse_merge(self):
@@ -303,6 +321,17 @@ class ArgParser:
         input_files = natsorted(sum([glob.glob(input_file) for input_file in args.input], []))
         args.input = input_files
         return args
+
+    @staticmethod
+    def parse_optional_multi_grammar(inputs: list[str], multi_char="^") -> list[int]:
+        outputs: list[int] = []
+        for item in inputs:
+            if multi_char in item:
+                value, times = map(int, item.split(multi_char))
+                outputs.extend([value] * times)
+            else:
+                outputs.append(int(item))
+        return outputs
 
 
 def print_help(invalid: bool):
