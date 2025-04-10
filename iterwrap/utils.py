@@ -1,6 +1,7 @@
 import json
 import logging
 import os
+import sys
 import tempfile
 import traceback
 from functools import wraps
@@ -11,20 +12,6 @@ from typing import IO, Callable, Literal, ParamSpec, TypeVar
 
 from multiprocess import synchronize
 from tqdm import tqdm
-
-
-# default file path
-def default_tmp_dir() -> str:
-    return os.path.join(tempfile.gettempdir(), "iterwrap")
-
-
-def get_output_path(name: str, id: int | Literal["*"], tmp_dir: str) -> str:
-    return os.path.join(tmp_dir, f"{name}_p{id}.output")
-
-
-def get_checkpoint_path(name: str, tmp_dir: str) -> str:
-    return os.path.join(tmp_dir, f"{name}.ckpt")
-
 
 # type
 DataType = TypeVar("DataType")  # the data type of the items to be processed
@@ -46,11 +33,40 @@ def setup_tqdm_logger(name=__name__, fmt="%(asctime)s - %(levelname)s - %(messag
     handler = TqdmLoggingHandler()
     formatter = logging.Formatter(fmt)
     handler.setFormatter(formatter)
+    logger.handlers.clear()
     logger.addHandler(handler)
     return logger
 
 
 logger = setup_tqdm_logger()
+
+
+# default file path
+def get_highspeed_tmp_dir():
+    """
+    Returns a platform-independent path to a shared memory directory or equivalent.
+    On Linux, prefers /dev/shm if available. Falls back to tempfile.gettempdir() otherwise.
+    """
+    if sys.platform.startswith("linux"):
+        shm_path = "/dev/shm"
+        if os.path.exists(shm_path) and os.access(shm_path, os.W_OK):
+            logger.warning(
+                "Using /dev/shm for high-speed cache storage. Make sure you have a stable environment."
+            )
+            return shm_path
+    return tempfile.gettempdir()
+
+
+def default_tmp_dir() -> str:
+    return os.path.join(get_highspeed_tmp_dir(), "iterwrap")
+
+
+def get_output_path(name: str, id: int | Literal["*"], tmp_dir: str) -> str:
+    return os.path.join(tmp_dir, f"{name}_p{id}.output")
+
+
+def get_checkpoint_path(name: str, tmp_dir: str) -> str:
+    return os.path.join(tmp_dir, f"{name}.ckpt")
 
 
 def check_unfinished(run_name: str, tmp_dir: str | None = None):
