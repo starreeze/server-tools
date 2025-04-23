@@ -48,7 +48,7 @@ from natsort import natsorted
 from rich.logging import RichHandler
 
 # package info
-__version__ = "0.1.7"
+__version__ = "0.1.8"
 __author__ = "Starreeze"
 __license__ = "GPLv3"
 __url__ = "https://github.com/starreeze/server-tools"
@@ -137,7 +137,9 @@ class JobQueue:
             json.dump(job_queue, file)
 
     @staticmethod
-    def add_single(cmd: list[str], id: int, order: int, ngpu: int, job_queue: list[dict[str, Any]]):
+    def add_single(
+        cmd: list[str], id: int, order: int, ngpu: int, gpu_arg: bool, job_queue: list[dict[str, Any]]
+    ):
         job_id = max([job["id"] for job in job_queue], default=-1) + 1 if id == -1 else id
         job = {
             "id": job_id,
@@ -146,6 +148,7 @@ class JobQueue:
             "ngpu": ngpu,
             "order": order,
             "dir": os.getcwd(),
+            "gpu_arg": gpu_arg,
         }
         job_queue.append(job)
         _logger.info(f"Added job {job_id}.")
@@ -159,8 +162,8 @@ class JobQueue:
                 raise ValueError("Id must be set to -1 to allow auto alloc for multiple jobs!")
             start = args._start
             for ngpu, nsample in zip(args.gpus, args.samples):
-                cmd = args.cmd + ["--start_pos", start, "--end_pos", start + nsample]
-                self.add_single(cmd, args.id, args.order, ngpu, job_queue)
+                cmd = args.cmd + ["--start_pos", str(start), "--end_pos", str(start + nsample)]
+                self.add_single(cmd, args.id, args.order, ngpu, args.gpu_arg, job_queue)
                 start += nsample
         else:
             if args._start:
@@ -171,7 +174,7 @@ class JobQueue:
                 args.cmd.extend(["--end_pos", str(args._start + args.samples[0])])
             else:
                 raise ValueError("Mismatched length of gpus and samples!")
-            self.add_single(args.cmd, args.id, args.order, args.gpus[0], job_queue)
+            self.add_single(args.cmd, args.id, args.order, args.gpus[0], args.gpu_arg, job_queue)
         self.save(job_queue)
 
     def list(self):
@@ -194,12 +197,14 @@ class JobQueue:
 
     def execute(self, job: dict[str, Any], gpus: list[int]):
         env = os.environ.copy()
-        env["CUDA_VISIBLE_DEVICES"] = ",".join(map(str, gpus)) if gpus else "-1"
+        gpus_list = map(str, gpus)
+        env["CUDA_VISIBLE_DEVICES"] = ",".join(gpus_list) if gpus else "-1"
         output_file = os.path.join(output_dir, f"job_{job['id']}_output.txt")
         os.chdir(job["dir"])  # chdir in subprocess will not change the dir of main process
+        job_command = job["command"] + (["--gpu_ids", *gpus_list] if job["gpu_arg"] else [])
         try:
             with open(output_file, "w") as file, subprocess.Popen(
-                job["command"],
+                job_command,
                 env=env,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
@@ -214,7 +219,7 @@ class JobQueue:
                     print(char, end="", flush=True)
                     file.write(char)
                 if proc.wait() != 0:
-                    raise subprocess.CalledProcessError(proc.returncode, job["command"])
+                    raise subprocess.CalledProcessError(proc.returncode, job_command)
 
             _logger.info(f"Job {job['id']} executed successfully.")
         except subprocess.CalledProcessError as e:
@@ -307,6 +312,9 @@ class ArgParser:
         parser.add_argument("--_start", type=int, default=0, help="the start position for handling the data")
         parser.add_argument("--order", "-o", type=int, default=0, help="the order of this job")
         parser.add_argument("--id", "-i", type=int, default=-1, help="the id of this job")
+        parser.add_argument(
+            "--assign_gpu_arg", action="store_true", help="whether to assign `--gpu_ids` to the job"
+        )
         known_args, unknown_args = parser.parse_known_args(self.args)
         known_args.cmd.extend(unknown_args)
         known_args.gpus = self.parse_optional_multi_grammar(known_args.gpus)

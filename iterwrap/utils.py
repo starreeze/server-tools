@@ -50,9 +50,12 @@ def get_highspeed_tmp_dir():
     if sys.platform.startswith("linux"):
         shm_path = "/dev/shm"
         if os.path.exists(shm_path) and os.access(shm_path, os.W_OK):
-            logger.warning(
-                "Using /dev/shm for high-speed cache storage. Make sure you have a stable environment."
-            )
+            test_path = os.path.join(shm_path, "iterwrap")
+            if not os.path.exists(test_path):
+                os.mkdir(test_path)
+                logger.warning(
+                    "Using /dev/shm for high-speed cache storage. Make sure you have enough storage and a stable environment."
+                )
             return shm_path
     return tempfile.gettempdir()
 
