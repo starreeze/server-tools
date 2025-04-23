@@ -163,7 +163,7 @@ class JobQueue:
             start = args._start
             for ngpu, nsample in zip(args.gpus, args.samples):
                 cmd = args.cmd + ["--start_pos", str(start), "--end_pos", str(start + nsample)]
-                self.add_single(cmd, args.id, args.order, ngpu, args.gpu_arg, job_queue)
+                self.add_single(cmd, args.id, args.order, ngpu, args.assign_gpu_arg, job_queue)
                 start += nsample
         else:
             if args._start:
@@ -174,7 +174,7 @@ class JobQueue:
                 args.cmd.extend(["--end_pos", str(args._start + args.samples[0])])
             else:
                 raise ValueError("Mismatched length of gpus and samples!")
-            self.add_single(args.cmd, args.id, args.order, args.gpus[0], args.gpu_arg, job_queue)
+            self.add_single(args.cmd, args.id, args.order, args.gpus[0], args.assign_gpu_arg, job_queue)
         self.save(job_queue)
 
     def list(self):
@@ -197,7 +197,7 @@ class JobQueue:
 
     def execute(self, job: dict[str, Any], gpus: list[int]):
         env = os.environ.copy()
-        gpus_list = map(str, gpus)
+        gpus_list = list(map(str, gpus))
         env["CUDA_VISIBLE_DEVICES"] = ",".join(gpus_list) if gpus else "-1"
         output_file = os.path.join(output_dir, f"job_{job['id']}_output.txt")
         os.chdir(job["dir"])  # chdir in subprocess will not change the dir of main process
