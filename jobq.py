@@ -12,11 +12,11 @@ The output of the jobs will be both logged to the console and a file.
 
 It support the following operations:
 1. add: `python jobq.py add [job_cmd] [-g gpus_required_for_each_job] [-s samples_to_be_processed_for_each_job]
-    [--_start initial_start_pos] [-o job_order]`.
+    [--_start initial_start_pos] [-o job_order] [-a assign_gpu_arg]`.
     Add a job to the queue with command to be executed with os.system(job_cmd).
     If `-g` and `-s` is set, the program will automatically split the job into multiple jobs.
     In `-g` `-s`, `x^y` means x repeats for y times for short, e.g., `1^4` means `1 1 1 1`.
-    Make sure that your program accepts `start_pos` and `end_pos`, and your output filename is dependent on them.
+    Make sure that your program accepts `start_pos` and `end_pos`, and your output filename is dependent on them. If `-a` is set, the program will automatically add `--gpu_ids` (the available gpu ids at run time) to the command.
     Example: `python jobq.py add python process.py -g 1^4 2^2 -s 100^5 101 --_start 100`.
     You can safely run it and list the jobs to see its effect.
 2. list: `python jobq.py ls`. List all jobs in the queue, including an ID
@@ -313,7 +313,7 @@ class ArgParser:
         parser.add_argument("--order", "-o", type=int, default=0, help="the order of this job")
         parser.add_argument("--id", "-i", type=int, default=-1, help="the id of this job")
         parser.add_argument(
-            "--assign_gpu_arg", action="store_true", help="whether to assign `--gpu_ids` to the job"
+            "--assign_gpu_arg", "-a", action="store_true", help="whether to assign `--gpu_ids` to the job"
         )
         known_args, unknown_args = parser.parse_known_args(self.args)
         known_args.cmd.extend(unknown_args)
@@ -382,6 +382,8 @@ def main():
         merge(parser.parse_merge())
     elif op == "clear":
         queue.clear()
+    elif op == "version":
+        print(__version__)
     else:
         print_help(invalid=not ("-h" in sys.argv[1] or "help" in sys.argv[1]))
 
