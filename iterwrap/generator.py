@@ -1,16 +1,16 @@
 import os
 from itertools import product
-from typing import Generic, Iterable, Literal, Sequence
+from typing import Iterable, Literal, Sequence
 
 from tqdm import tqdm
 
-from .utils import DataType, default_tmp_dir, get_checkpoint_path
+from .utils import default_tmp_dir, get_checkpoint_path
 
 
-class IterateWrapper(Generic[DataType]):
+class IterateWrapper:
     def __init__(
         self,
-        *data: Iterable[DataType],
+        *data: Iterable,
         mode: Literal["product", "zip"] = "product",
         restart=False,
         bar=0,
@@ -31,10 +31,12 @@ class IterateWrapper(Generic[DataType]):
             run_name: name of the run to identify the checkpoint and output files
             tmp_dir: temporary directory for checkpoint files
         """
-        if mode == "product":
-            self.data: Sequence[DataType] = convert_type(product(*data))
+        if len(data) == 1:
+            self.data: Sequence = convert_type(data[0])
+        elif mode == "product":
+            self.data: Sequence = convert_type(product(*data))
         elif mode == "zip":
-            self.data = convert_type(zip(*data))
+            self.data: Sequence = convert_type(zip(*data))
         else:
             raise ValueError("mode must be 'product' or 'zip'")
         total_items = total_items if total_items is not None else len(self.data)
