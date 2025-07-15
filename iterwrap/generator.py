@@ -39,32 +39,34 @@ class IterateWrapper:
             self.data: Sequence = convert_type(zip(*data))
         else:
             raise ValueError("mode must be 'product' or 'zip'")
-        total_items = total_items if total_items is not None else len(self.data)
+
         os.makedirs(tmp_dir, exist_ok=True)
-        checkpoint_path = get_checkpoint_path(run_name, tmp_dir)
-        if restart:
-            os.remove(checkpoint_path)
+        self.checkpoint_path = get_checkpoint_path(run_name, tmp_dir)
+        self.restart = restart
+        self.bar = bar
+        self.total_items = total_items
+
+    def __iter__(self):
+        if self.restart:
+            os.remove(self.checkpoint_path)
         try:
-            with open(checkpoint_path, "r") as checkpoint_file:
+            with open(self.checkpoint_path, "r") as checkpoint_file:
                 checkpoint = int(checkpoint_file.read().strip())
         except FileNotFoundError:
             checkpoint = 0
-        if bar >= 0:
-            self.wrapped_range = tqdm(
-                range(checkpoint, total_items), initial=checkpoint, total=total_items, position=bar
+
+        total_items = self.total_items if self.total_items is not None else len(self.data)
+        if self.bar >= 0:
+            wrapped_range = tqdm(
+                range(checkpoint, total_items), initial=checkpoint, total=total_items, position=self.bar
             )
         else:
-            self.wrapped_range = range(checkpoint, total_items)
-        self.wrapped_iter = iter(self.wrapped_range)
+            wrapped_range = range(checkpoint, total_items)
+        self.wrapped_iter = iter(wrapped_range)
         self.index = 0
-        self.checkpoint_path = checkpoint_path
-
-    def __iter__(self):
         return self
 
     def __next__(self):
-        with open(self.checkpoint_path, "w") as checkpoint_file:
-            checkpoint_file.write(str(self.index))
         try:
             self.index = next(self.wrapped_iter)
         except StopIteration:
@@ -73,4 +75,6 @@ class IterateWrapper:
             except FileNotFoundError:
                 pass
             raise StopIteration()
+        with open(self.checkpoint_path, "w") as checkpoint_file:
+            checkpoint_file.write(str(self.index))
         return self.data[self.index]
