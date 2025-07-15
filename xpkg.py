@@ -3,17 +3,19 @@
 # @Date    : 2022-11-24 19:40:25
 # @Author  : Shangyu.Xing (starreeze@foxmail.com)
 
-import os, shutil, json
-from pathlib import Path
+import json
+import os
+import shutil
 from argparse import ArgumentParser
 from collections import deque
+from pathlib import Path
 
 __version__ = "0.4"
 base_path = os.environ["SOFTWARE_BASE"]
 if not base_path:
     base_path = "/tmp/software"
+tmp_path = "/dev/shm/software"
 status_path = os.path.join(base_path, "var/xpkg-status.json")
-tmp_path = os.path.join(base_path, "tmp")
 links = {"bin": "usr/bin", "sbin": "usr/sbin", "lib": "usr/lib", "lib64": "usr/lib"}
 
 shell_config = """
@@ -40,12 +42,13 @@ def parse_args():
 
 def fix_link():
     for k, v in links.items():
-        src = os.path.join(base_path, k)
-        if not Path(src).is_symlink():
-            dst = os.path.join(tmp_path, v)
-            shutil.copytree(src, dst, dirs_exist_ok=True)
-            shutil.rmtree(src)
-            os.symlink(dst, src)
+        dst = os.path.join(base_path, k)
+        src = os.path.join(base_path, v)
+        if os.path.exists(dst):
+            assert not Path(dst).is_symlink()
+            shutil.copytree(dst, src, dirs_exist_ok=True)
+            shutil.rmtree(dst)
+        os.symlink(src, dst)
 
 
 def init():
@@ -112,6 +115,13 @@ def install_packages(names: list, status: dict, force=False, manual=False) -> No
             elif name not in required:
                 required.add(name)
                 processing.append(name)
+
+    os.makedirs(tmp_path, exist_ok=True)
+    for dir in links.keys():
+        dir_path = os.path.join(base_path, dir)
+        if os.path.exists(dir_path):
+            os.remove(dir_path)
+
     for name in required:
         if os.system("apt-get download " + name):
             if force:
@@ -119,9 +129,9 @@ def install_packages(names: list, status: dict, force=False, manual=False) -> No
                 continue
             raise RuntimeError("Error installing package " + name)
         filename = [file for file in os.listdir(".") if file.endswith(".deb")][0]
-        files = os.popen("dpkg-deb -xv {} {}".format(filename, base_path)).read().splitlines()
+        files = os.popen(f"dpkg-deb -xv {filename} {tmp_path}").read().splitlines()
         status[name] = {"type": "xpkg", "files": files}
-        os.system("rm -f *.deb")
+        os.system(f"cp -r {tmp_path}/* {base_path}; rm -rf {filename} {tmp_path}")
 
 
 def remove_package(name, status):
@@ -168,13 +178,15 @@ def main():
         print("Error: current directory contains deb files. Please cd to another directory")
         exit(-1)
     if args.install:
-        install_packages(args.install, status, args.force, True)
-        fix_link()
-        print(
-            "successfully installed packages ",
-            args.install,
-            ", please source .bashrc or restart the shell to use",
-        )
+        try:
+            install_packages(args.install, status, args.force, True)
+            print(
+                "successfully installed packages ",
+                args.install,
+                ", please source .bashrc or restart the shell to use",
+            )
+        finally:
+            fix_link()
     for pkg in args.remove:
         remove_package(pkg, status)
         print("successfully removed package ", pkg)
