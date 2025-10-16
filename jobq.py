@@ -262,7 +262,7 @@ class JobQueue:
                     del job_queue[i]
                 self.save(job_queue)
             else:
-                _logger.info(f"No available gpu.")
+                _logger.info("No available gpu.")
 
             time.sleep(args.frequency)
 

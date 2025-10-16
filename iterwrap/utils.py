@@ -8,7 +8,7 @@ from functools import wraps
 from glob import glob
 from inspect import signature
 from time import sleep
-from typing import IO, Callable, Literal, ParamSpec, TypeVar
+from typing import IO, Callable, Literal, ParamSpec, TypeVar, overload
 
 from multiprocess import synchronize
 from tqdm import tqdm
@@ -50,9 +50,7 @@ def get_highspeed_tmp_dir():
     if sys.platform.startswith("linux"):
         shm_path = "/dev/shm"
         if os.path.exists(shm_path) and os.access(shm_path, os.W_OK):
-            logger.warning(
-                "Using /dev/shm for high-speed cache storage. Make sure you have a stable environment."
-            )
+            logger.info("Using /dev/shm for high-speed cache storage")
             return shm_path
     return tempfile.gettempdir()
 
@@ -85,10 +83,24 @@ def check_unfinished(run_name: str, tmp_dir: str | None = None):
     return False
 
 
-def retry_dec(retry=5, wait=1, on_error: Literal["raise", "continue"] = "raise"):
+@overload
+def retry_dec(
+    retry: int, wait: int, on_error: Literal["raise"]
+) -> Callable[[Callable[ParamTypes, ReturnType]], Callable[ParamTypes, ReturnType]]: ...
+
+
+@overload
+def retry_dec(
+    retry: int, wait: int, on_error: Literal["continue"]
+) -> Callable[[Callable[ParamTypes, ReturnType]], Callable[ParamTypes, ReturnType | None]]: ...
+
+
+def retry_dec(
+    retry=5, wait=1, on_error: Literal["raise", "continue"] = "raise"
+) -> Callable[[Callable[ParamTypes, ReturnType]], Callable[ParamTypes, ReturnType | None]]:
     "decorator for retrying a function on exception; on_error could be raise or continue"
 
-    def decorator(func: Callable[ParamTypes, ReturnType]):
+    def decorator(func: Callable[ParamTypes, ReturnType]) -> Callable[ParamTypes, ReturnType | None]:
         def wrapper(*args: ParamTypes.args, **kwargs: ParamTypes.kwargs) -> ReturnType | None:
             if retry <= 1:
                 return func(*args, **kwargs)
