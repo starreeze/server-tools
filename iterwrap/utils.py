@@ -85,6 +85,18 @@ def check_unfinished(run_name: str, tmp_dir: str | None = None):
 
 @overload
 def retry_dec(
+    retry: int,
+) -> Callable[[Callable[ParamTypes, ReturnType]], Callable[ParamTypes, ReturnType]]: ...
+
+
+@overload
+def retry_dec(
+    retry: int, wait: int
+) -> Callable[[Callable[ParamTypes, ReturnType]], Callable[ParamTypes, ReturnType]]: ...
+
+
+@overload
+def retry_dec(
     retry: int, wait: int, on_error: Literal["raise"]
 ) -> Callable[[Callable[ParamTypes, ReturnType]], Callable[ParamTypes, ReturnType]]: ...
 
